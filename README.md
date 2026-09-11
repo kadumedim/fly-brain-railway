@@ -120,9 +120,15 @@ it once, then point the mission at it:
 
 ```sh
 cd web
-docker build -t ghcr.io/<you>/fly-web:latest .
-docker push ghcr.io/<you>/fly-web:latest   # make the package public
+./build-push.sh                                # then make the package public
+# or: IMAGE=ghcr.io/<you>/fly-web:latest ./build-push.sh
 ```
+
+⚠️ Build it for **linux/amd64** — that is all `build-push.sh` really does
+(`docker buildx build --platform linux/amd64 --push`). A plain `docker build`
+on an Apple Silicon Mac pushes an arm64 image; Railway then fails with
+``exec container process `/usr/local/bin/docker-entrypoint.sh`: Exec format
+error``, the container never starts, and the domain answers 502.
 
 Set `WEB_IMAGE=ghcr.io/<you>/fly-web:latest` on the fly service. The mission
 then wires `PORT`/`FLY_APP_URL` onto the web service automatically and the

@@ -1,3 +1,6 @@
+# Railway runs linux/amd64 -- build with `./build-push.sh` (buildx --platform
+# linux/amd64). A native arm64 build dies with "Exec format error" on the base
+# image's docker-entrypoint.sh and the domain 502s.
 FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json ./
