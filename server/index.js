@@ -83,6 +83,7 @@ const mission = createMission({
 host.ready.then(function () {
 	log('Brain online: ' + host.neuronCount + ' neurons / ' + host.edgeCount + ' edges (FlyWire FAFB v783)');
 	behavior.start();
+	mission.kickLoop();
 	// fly state at ~15Hz
 	setInterval(function () {
 		broadcast('fly', behavior.getFlyState());

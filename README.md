@@ -100,6 +100,13 @@ never reaches browsers; the password is just the trigger guard.
 | `DRY_RUN=1` | log mutations, fake SUCCESS — full demo without a token |
 | `DRY_RUN_FAIL` | e.g. `redis:1` — force n failures for a service (dry-run) |
 | `TEARDOWN_AFTER_MIN` | auto-SWAT n minutes after ALL GREEN |
+| `AUTO_LOOP=1` | exhibit mode: start on boot, then loop mission → ALL GREEN → SWAT → mission forever; HUD shows runs / last / best times |
+| `LOOP_LINGER_MIN` | auto-loop: minutes to admire the green board before SWAT (default 3) |
+| `LOOP_REST_MIN` | auto-loop: minutes of rest between runs (default 2) |
+
+⚠️ `AUTO_LOOP` means continuous real spend and steady API traffic (~3-4
+runs/hour ≈ 150-250 requests/h — above the free tier's 100/h; use Hobby).
+Run times reset when the fly service redeploys (stats are in-memory).
 
 ## Deploy as a template
 

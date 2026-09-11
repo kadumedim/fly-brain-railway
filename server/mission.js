@@ -73,6 +73,11 @@ function createMission(deps) {
 	const teardownAfterMin = Number(deps.teardownAfterMin || process.env.TEARDOWN_AFTER_MIN || 0);
 	// The fly's own service -- teardown must never touch it.
 	const ownServiceId = deps.ownServiceId || process.env.RAILWAY_SERVICE_ID || null;
+	// Auto-loop exhibit mode: start on boot, then forever
+	// mission -> ALL_GREEN -> linger -> SWAT -> rest -> mission ...
+	const loopEnabled = deps.loop !== undefined ? deps.loop : process.env.AUTO_LOOP === '1';
+	const loopLingerMs = parseFloat(process.env.LOOP_LINGER_MIN || '3') * 60000;
+	const loopRestMs = parseFloat(process.env.LOOP_REST_MIN || '2') * 60000;
 
 	const state = {
 		mission: 'IDLE',
@@ -82,6 +87,7 @@ function createMission(deps) {
 		webDomain: null,
 		serviceStatuses: {}, // serviceName -> deployment status
 		startedAt: null,
+		stats: { runs: 0, lastMs: null, bestMs: null }, // in-memory; resets on redeploy
 		steps: STEP_DEFS.map(function (d) {
 			return {
 				id: d.id,
@@ -326,6 +332,10 @@ function createMission(deps) {
 		if (st.retries >= MAX_RETRIES) {
 			log('🛑 ' + st.title + ' failed ' + MAX_RETRIES + ' times -- mission ABORTED');
 			setMissionState('ABORTED');
+			if (loopEnabled) {
+				log('🔁 Auto-loop: cleaning up and retrying in ' + fmtMs(loopRestMs));
+				scheduleLoop(loopRestMs);
+			}
 			return;
 		}
 		log('⏲️ Retrying "' + st.title + '" in ' + (FAILURE_COOLDOWN_MS / 1000) + 's (attempt ' + (st.retries + 1) + '/' + MAX_RETRIES + ')');
@@ -350,16 +360,84 @@ function createMission(deps) {
 			setMissionState('ALL_GREEN');
 			behavior.setHungerFloor(0);
 			behavior.celebrate();
+
+			const runMs = Date.now() - state.startedAt;
+			state.stats.runs++;
+			state.stats.lastMs = runMs;
+			const isBest = state.stats.bestMs === null || runMs < state.stats.bestMs;
+			if (isBest) state.stats.bestMs = runMs;
+			emit({ kind: 'stats', stats: state.stats });
+
 			emit({ kind: 'celebration', domain: state.webDomain, projectUrl: state.projectUrl });
 			log('🎉 ALL GREEN -- the fly brain built a 4-service app around itself on Railway!');
+			log('⏱️ Run #' + state.stats.runs + ': ' + fmtMs(runMs) +
+				(isBest && state.stats.runs > 1 ? ' -- NEW BEST! 🏆' : ''));
 			if (state.webDomain) log('🌐 Live at https://' + state.webDomain);
-			if (teardownAfterMin > 0) {
+			if (loopEnabled) {
+				log('🔁 Auto-loop: admiring the green board for ' + fmtMs(loopLingerMs) + ', then SWAT and go again');
+				scheduleLoop(loopLingerMs);
+			} else if (teardownAfterMin > 0) {
 				log('⏲️ Auto-teardown in ' + teardownAfterMin + ' min');
 				teardownTimer = setTimeout(function () { teardown(); }, teardownAfterMin * 60 * 1000);
 			}
 		} else {
 			log('⚠️ Steps done but not all services green: ' + JSON.stringify(state.serviceStatuses));
 		}
+	}
+
+	function fmtMs(ms) {
+		const s = Math.round(ms / 1000);
+		return Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + 's';
+	}
+
+	/* ---- auto-loop reconciler ----
+	 * A single timer that inspects mission state and does the obvious next
+	 * thing. Manual admin actions can't wedge it, and it self-heals: a tick
+	 * that finds the mission mid-run just checks back later. */
+
+	let loopTimer = null;
+
+	function scheduleLoop(ms) {
+		if (!loopEnabled) return;
+		clearTimeout(loopTimer);
+		loopTimer = setTimeout(function () { loopTick(); }, ms);
+	}
+
+	async function loopTick() {
+		try {
+			if (state.mission === 'ALL_GREEN' || state.mission === 'ABORTED') {
+				if (spawnedServiceIds().length > 0) {
+					await teardown();
+				} else if (state.mission === 'ABORTED') {
+					resetSteps();
+					setMissionState('TORN_DOWN');
+				}
+				log('🔁 Auto-loop: resting ' + fmtMs(loopRestMs) + ' before the next run');
+				scheduleLoop(loopRestMs);
+				return;
+			}
+			if (state.mission === 'IDLE' || state.mission === 'TORN_DOWN') {
+				const r = await start();
+				if (!r.ok) {
+					log('🔁 Auto-loop: cannot start (' + r.error + ') -- retrying in 10m');
+					scheduleLoop(10 * 60000);
+					return;
+				}
+			}
+		} catch (err) {
+			log('🔁 Auto-loop error: ' + err.message + ' -- retrying in 10m');
+			scheduleLoop(10 * 60000);
+			return;
+		}
+		// mission running (or just started): idle watchdog re-check
+		scheduleLoop(5 * 60000);
+	}
+
+	// Called once from the server after the brain is ready.
+	function kickLoop() {
+		if (!loopEnabled) return;
+		log('🔁 Auto-loop enabled: mission -> ALL GREEN -> SWAT -> mission, forever');
+		scheduleLoop(8000);
 	}
 
 	/* ---- public API ---- */
@@ -472,6 +550,8 @@ function createMission(deps) {
 			webDomain: state.webDomain,
 			serviceStatuses: state.serviceStatuses,
 			startedAt: state.startedAt,
+			stats: state.stats,
+			autoLoop: loopEnabled,
 			steps: state.steps.map(function (s) {
 				return {
 					id: s.id, title: s.title, node: s.node,
@@ -489,6 +569,7 @@ function createMission(deps) {
 		teardown: teardown,
 		reset: reset,
 		snapshot: snapshot,
+		kickLoop: kickLoop,
 		get state() { return state.mission; },
 	};
 }

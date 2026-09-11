@@ -76,6 +76,8 @@
 			break;
 		case 'mission-state':
 			m.mission = evt.state;
+			// Approximate; the next snapshot (reconnect) carries the exact value
+			if (evt.state === 'ARMED') m.startedAt = Date.now();
 			break;
 		case 'services':
 			m.serviceStatuses = evt.statuses;
@@ -86,6 +88,9 @@
 			break;
 		case 'domain':
 			m.webDomain = evt.domain;
+			break;
+		case 'stats':
+			m.stats = evt.stats;
 			break;
 		}
 		fire('mission', evt);
