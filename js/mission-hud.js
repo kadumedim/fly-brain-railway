@@ -220,4 +220,23 @@
 	resetBtn.addEventListener('click', function () {
 		post('/api/mission/reset');
 	});
+
+	/* ---- "what's real?" disclosure modal ---- */
+
+	var realBtn = document.getElementById('realBtn');
+	var realModal = document.getElementById('realModal');
+	var realClose = document.getElementById('realClose');
+
+	realBtn.addEventListener('click', function () {
+		realModal.classList.remove('hidden');
+	});
+	realClose.addEventListener('click', function () {
+		realModal.classList.add('hidden');
+	});
+	realModal.addEventListener('click', function (e) {
+		if (e.target === realModal) realModal.classList.add('hidden');
+	});
+	document.addEventListener('keydown', function (e) {
+		if (e.key === 'Escape') realModal.classList.add('hidden');
+	});
 })();
