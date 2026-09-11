@@ -482,6 +482,27 @@ function createMission(deps) {
 		} catch (err) {
 			return { ok: false, code: 409, error: err.message };
 		}
+		// Sweep leftovers: a redeploy of the fly wipes its in-memory state, so
+		// the project may still hold mission-owned services from a previous
+		// run. Clear the table before cooking (never the fly's own service;
+		// best-effort -- adoption covers anything that refuses to die).
+		try {
+			const status = await client.projectStatus(state.projectId, state.environmentId);
+			const owned = ['postgres', 'redis', 'web', 'worker'];
+			const leftovers = status.services.filter(function (s) {
+				return owned.indexOf(s.name) !== -1 && s.serviceId !== ownServiceId;
+			});
+			if (leftovers.length) {
+				log('🧹 Clearing ' + leftovers.length + ' leftover service(s) from a previous run...');
+				for (const svc of leftovers) {
+					try {
+						await client.serviceDelete(svc.serviceId, state.environmentId);
+					} catch (err) {
+						log('⚠️ Could not delete leftover ' + svc.name + ': ' + err.message + ' -- the fly will adopt it instead');
+					}
+				}
+			}
+		} catch (err) { /* sweep is best-effort */ }
 		resetInternal();
 		state.startedAt = Date.now();
 		setMissionState('ARMED');
