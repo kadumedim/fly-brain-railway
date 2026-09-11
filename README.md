@@ -77,7 +77,7 @@ makes the redis deploy fail once → watch the NOCI startle and the retry.
 7. Done? **SWAT** deletes the spawned services (the fly stays).
 
 ⚠️ **This creates real services on your Railway account.** The four services
-(postgres:16-alpine, redis:7-alpine, nginx:alpine, busybox:stable) are tiny
+(postgres:16-alpine, redis:7-alpine, nginx:alpine, alpine:3) are tiny
 but not free forever — tear down when done (`SWAT`, or set
 `TEARDOWN_AFTER_MIN`). A full run makes <60 API requests (fits the free
 tier's 100/h; Hobby recommended). `RAILWAY_PROJECT_ID` /
@@ -103,6 +103,11 @@ never reaches browsers; the password is just the trigger guard.
 | `AUTO_LOOP=1` | exhibit mode: start on boot, then loop mission → ALL GREEN → SWAT → mission forever; HUD shows runs / last / best times |
 | `LOOP_LINGER_MIN` | auto-loop: minutes to admire the green board before SWAT (default 3) |
 | `LOOP_REST_MIN` | auto-loop: minutes of rest between runs (default 2) |
+| `STATS_FILE` | where run stats persist (default `/data/fly-stats.json` — mount a Railway volume at `/data` to keep best times across redeploys; in-memory otherwise) |
+
+The worker is an `alpine:3` container that actually uses the wiring: after
+the wire-vars step it runs a real `SELECT 1` against Postgres and a redis-cli
+`PING` every 30s — watch its logs on the dashboard.
 
 ⚠️ `AUTO_LOOP` means continuous real spend and steady API traffic (~3-4
 runs/hour ≈ 150-250 requests/h — above the free tier's 100/h; use Hobby).

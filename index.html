@@ -16,10 +16,62 @@
 	</div>
 	<div class="scale" id="scaleIndicator">connecting…</div>
 	<div class="topbar-right">
+		<button id="realBtn" class="real-btn">what's real?</button>
 		<span id="viewerCount" class="viewers" title="people watching this fly">👁 0</span>
 		<span id="connBadge" class="conn-badge off">offline</span>
 	</div>
 </header>
+
+<div id="realModal" class="modal-backdrop hidden">
+	<div class="modal">
+		<button id="realClose" class="modal-close" aria-label="close">✕</button>
+		<h2>🪰 What's real / what's scaffold</h2>
+		<p class="modal-lede">A real full-connectome simulation decides <em>when</em> and
+		<em>how</em>; a scripted mission decides <em>what</em>. Same honest deal as every
+		viral connectome demo — here's the exact split.</p>
+
+		<h3 class="real">✅ Real</h3>
+		<ul>
+			<li>All <b>139,255 neurons and ~2.7M synaptic connections</b> of the
+			FlyWire FAFB v783 connectome are simulated server-side, 10 ticks/sec —
+			the full anatomical wiring diagram, not a subset or a recording.</li>
+			<li>The causal chain: food odor stimulates the actual
+			<code>OLF_ORN_FOOD</code>/<code>GUS_GRN_SWEET</code> neuron populations →
+			spikes cascade through the real connectome → feeding-circuit activity
+			drives the feed behavior. Zero the connectome and nothing deploys.</li>
+			<li>The walking, searching, grooming detours, and the startle after a
+			failed deploy (a nociception stimulus into the real <code>NOCI</code>
+			population) are all live simulation output — every run is different.</li>
+			<li>The Railway deployments are real GraphQL mutations, spending real
+			money — verify the services yourself on the project's public dashboard.</li>
+			<li>The spike raster below the board shows live per-group firing from
+			the sim, streamed at 10Hz.</li>
+		</ul>
+
+		<h3 class="scaffold">🔧 Scaffold</h3>
+		<ul>
+			<li>The neuron dynamics are simple leaky integrate-and-fire with uniform
+			parameters — real anatomy, toy physiology. Nobody has biophysically
+			calibrated parameters for 139K neurons.</li>
+			<li>FlyWire covers the brain only: there is no ventral nerve cord in the
+			dataset, so motor neuron outputs are synthesized from real descending-neuron
+			activity by hand-written code. Real brain, puppet spinal cord.</li>
+			<li>Behavior selection is a thresholded readout state machine over neuron-group
+			activity, and drives (hunger, fear…) are scalar variables injected as
+			stimulation — scaffolding around the sim, not emergent from it.</li>
+			<li>The mission stacks the deck: while a step is pending, hunger is clamped
+			high and the food has a board-wide odor plume. The fly was always going to
+			want the food — but finding, reaching, and eating it is its own doing.</li>
+			<li>No learning: synaptic weights never change. Run 500 is statistically
+			identical to run 1 — the best-time board measures luck, not improvement.</li>
+		</ul>
+
+		<p class="modal-foot">Sim adapted from
+		<a href="https://github.com/snedea/flybrain" target="_blank" rel="noopener">snedea/flybrain</a> (MIT) ·
+		connectome by <a href="https://flywire.ai" target="_blank" rel="noopener">FlyWire</a>
+		(FAFB v783, CC-BY-NC 4.0) · full attribution in NOTICE.md</p>
+	</div>
+</div>
 
 <main id="layout">
 	<section id="stage">
@@ -54,7 +106,7 @@
 	</aside>
 </main>
 
-<footer id="neuralPanel" class="collapsed">
+<footer id="neuralPanel">
 	<button id="neuralToggle">🧠 139,255 neurons — live spikes <span class="chev">▴</span></button>
 	<canvas id="spikeCanvas"></canvas>
 </footer>

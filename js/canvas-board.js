@@ -111,7 +111,7 @@
 		'postgres': 'postgres:16-alpine',
 		'redis': 'redis:7-alpine',
 		'web': 'nginx:alpine + domain',
-		'worker': 'busybox:stable',
+		'worker': 'alpine:3 · psql + redis-cli',
 		'wire-vars': 'DATABASE_URL · REDIS_URL',
 	};
 

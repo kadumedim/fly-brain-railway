@@ -22,6 +22,8 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const HUNGER_FLOOR = 0.75;
 const FAILURE_COOLDOWN_MS = 8000;
@@ -54,7 +56,7 @@ const STEP_DEFS = [
 		title: 'Deploy Worker',
 		node: { x: 1320, y: 650 },
 		serviceName: 'worker',
-		image: 'busybox:stable',
+		image: 'alpine:3',
 	},
 	{
 		id: 'wire-vars',
@@ -105,6 +107,29 @@ function createMission(deps) {
 	let pgPassword = null;
 	let teardownTimer = null;
 	let executing = false;
+
+	/* ---- stats persistence (best time survives redeploys if a Railway
+	 * volume is mounted at /data; silently in-memory-only otherwise) ---- */
+	const statsFile = process.env.STATS_FILE || '/data/fly-stats.json';
+	let statsPersist = true;
+	try {
+		const saved = JSON.parse(fs.readFileSync(statsFile, 'utf8'));
+		state.stats.runs = saved.runs || 0;
+		state.stats.lastMs = saved.lastMs || null;
+		state.stats.bestMs = saved.bestMs || null;
+		logSink('Loaded persisted stats: ' + JSON.stringify(state.stats));
+	} catch (e) { /* first boot or no volume */ }
+
+	function saveStats() {
+		if (!statsPersist) return;
+		try {
+			fs.mkdirSync(path.dirname(statsFile), { recursive: true });
+			fs.writeFileSync(statsFile, JSON.stringify(state.stats));
+		} catch (e) {
+			statsPersist = false;
+			logSink('Stats persistence off (' + e.code + ' on ' + statsFile + ') -- mount a volume at /data to keep the leaderboard across redeploys');
+		}
+	}
 
 	function stepDef(id) {
 		return STEP_DEFS.find(function (d) { return d.id === id; });
@@ -236,22 +261,18 @@ function createMission(deps) {
 		}
 		case 'redis': {
 			const how = await ensureService(st, 'redis', stepDef(st.id).image);
-			if (how === 'created') {
-				log('🟥 serviceCreate redis (redis:7-alpine) OK');
-			} else {
-				await client.serviceInstanceDeploy(st.serviceId, state.environmentId);
-			}
+			if (how === 'created') log('🟥 serviceCreate redis (redis:7-alpine) OK');
+			// serviceCreate does NOT auto-deploy (verified live) -- always trigger
+			await client.serviceInstanceDeploy(st.serviceId, state.environmentId);
 			log('🚀 redis deploying -- ⏳ waiting for green');
 			await verifyStep(st, 'redis');
 			return;
 		}
 		case 'web': {
 			const how = await ensureService(st, 'web', stepDef(st.id).image);
-			if (how === 'created') {
-				log('🌐 serviceCreate web (nginx:alpine) OK');
-			} else {
-				await client.serviceInstanceDeploy(st.serviceId, state.environmentId);
-			}
+			if (how === 'created') log('🌐 serviceCreate web (nginx:alpine) OK');
+			// serviceCreate does NOT auto-deploy (verified live) -- always trigger
+			await client.serviceInstanceDeploy(st.serviceId, state.environmentId);
 			if (!state.webDomain) {
 				try {
 					const d = await client.serviceDomainCreate(st.serviceId, state.environmentId, 80);
@@ -270,9 +291,12 @@ function createMission(deps) {
 		case 'worker': {
 			const how = await ensureService(st, 'worker', stepDef(st.id).image);
 			if (how === 'created') {
-				log('🐝 serviceCreate worker (busybox:stable) OK');
+				log('🐝 serviceCreate worker (' + stepDef(st.id).image + ') OK');
+				// A worker that actually uses the wiring: before wire-vars it
+				// buzzes unwired; after the redeploy with DATABASE_URL/REDIS_URL
+				// it runs a real SELECT 1 and PING every 30s (visible in logs).
 				await client.serviceInstanceUpdate(st.serviceId, state.environmentId, {
-					startCommand: 'sh -c \'while true; do echo "[fly-worker] buzz"; sleep 30; done\'',
+					startCommand: "sh -c 'apk add --no-cache postgresql16-client redis >/dev/null 2>&1 || apk add --no-cache postgresql-client redis >/dev/null 2>&1; while true; do if [ -z \"$DATABASE_URL\" ]; then echo \"[fly-worker] buzz (unwired -- waiting for the fly)\"; else if command -v psql >/dev/null && psql \"$DATABASE_URL\" -tAc \"SELECT 1\" >/dev/null 2>&1; then echo \"[fly-worker] buzz -- postgres SELECT 1 OK\"; else echo \"[fly-worker] postgres unreachable\"; fi; if command -v redis-cli >/dev/null; then echo \"[fly-worker] redis PING -> $(redis-cli -u \"$REDIS_URL\" PING 2>/dev/null || echo unreachable)\"; fi; fi; sleep 30; done'",
 				});
 			}
 			await client.serviceInstanceDeploy(st.serviceId, state.environmentId);
@@ -366,6 +390,7 @@ function createMission(deps) {
 			state.stats.lastMs = runMs;
 			const isBest = state.stats.bestMs === null || runMs < state.stats.bestMs;
 			if (isBest) state.stats.bestMs = runMs;
+			saveStats();
 			emit({ kind: 'stats', stats: state.stats });
 
 			emit({ kind: 'celebration', domain: state.webDomain, projectUrl: state.projectUrl });
