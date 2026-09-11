@@ -1,0 +1,16 @@
+{
+	"name": "fly-brain-railway",
+	"version": "1.0.0",
+	"description": "A real spiking simulation of the full fruit-fly brain (FlyWire FAFB v783, 139,255 neurons) whose emergent behavior deploys a real multi-service app on Railway",
+	"main": "server/index.js",
+	"scripts": {
+		"start": "node server/index.js",
+		"dev": "DRY_RUN=1 node server/index.js",
+		"smoke-test": "node scripts/schema-smoke-test.js"
+	},
+	"engines": {
+		"node": ">=22"
+	},
+	"license": "MIT",
+	"dependencies": {}
+}

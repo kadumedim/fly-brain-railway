@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fly Brain Deploys on Railway 🪰🚂</title>
+<link rel="stylesheet" href="css/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🪰</text></svg>">
+</head>
+<body>
+
+<header id="topbar">
+	<div class="title">
+		<span class="fly-emoji">🪰</span>
+		<h1>Fly Brain Deploys on Railway</h1>
+	</div>
+	<div class="scale" id="scaleIndicator">connecting…</div>
+	<div class="topbar-right">
+		<span id="viewerCount" class="viewers" title="people watching this fly">👁 0</span>
+		<span id="connBadge" class="conn-badge off">offline</span>
+	</div>
+</header>
+
+<main id="layout">
+	<section id="stage">
+		<canvas id="board"></canvas>
+		<div id="celebration" class="hidden"></div>
+	</section>
+
+	<aside id="hud">
+		<div class="hud-section">
+			<div class="hud-heading">
+				<span id="missionState" class="mission-state">IDLE</span>
+				Mission
+			</div>
+			<ol id="checklist"></ol>
+		</div>
+		<div class="hud-section links" id="hudLinks"></div>
+		<div class="hud-section grow">
+			<div class="hud-heading">Log</div>
+			<div id="missionLog"></div>
+		</div>
+		<div class="hud-section" id="adminSection">
+			<button id="adminBtn" class="btn subtle">admin</button>
+			<div id="adminPanel" class="hidden">
+				<input id="adminPassword" type="password" placeholder="admin password" autocomplete="off">
+				<button id="startBtn" class="btn primary">🎬 Start mission</button>
+				<button id="swatBtn" class="btn danger">🖐 SWAT (teardown)</button>
+				<button id="resetBtn" class="btn subtle">reset</button>
+				<div id="adminMsg"></div>
+			</div>
+		</div>
+	</aside>
+</main>
+
+<footer id="neuralPanel" class="collapsed">
+	<button id="neuralToggle">🧠 139,255 neurons — live spikes <span class="chev">▴</span></button>
+	<canvas id="spikeCanvas"></canvas>
+</footer>
+
+<script src="js/stream-client.js"></script>
+<script src="js/fly-sprite.js"></script>
+<script src="js/canvas-board.js"></script>
+<script src="js/neural-panel.js"></script>
+<script src="js/mission-hud.js"></script>
+</body>
+</html>

@@ -1,0 +1,185 @@
+/* Railway-dark spectator theme */
+
+:root {
+	--bg: #0b0d11;
+	--panel: #12151c;
+	--panel-2: #171b24;
+	--border: #232a36;
+	--text: #e6e9ef;
+	--muted: #8b93a3;
+	--accent: #c084fc;
+	--green: #4ade80;
+	--yellow: #fbbf24;
+	--red: #f87171;
+	--gray: #4b5563;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+	height: 100%;
+	background: var(--bg);
+	color: var(--text);
+	font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	overflow: hidden;
+}
+
+body { display: flex; flex-direction: column; }
+
+/* ---- top bar ---- */
+
+#topbar {
+	display: flex;
+	align-items: center;
+	gap: 16px;
+	padding: 10px 16px;
+	background: var(--panel);
+	border-bottom: 1px solid var(--border);
+	flex: 0 0 auto;
+}
+#topbar .title { display: flex; align-items: center; gap: 10px; }
+#topbar .fly-emoji { font-size: 22px; }
+#topbar h1 { font-size: 15px; font-weight: 600; white-space: nowrap; }
+#topbar .scale { font-size: 12px; color: var(--muted); flex: 1; text-align: center; }
+.topbar-right { display: flex; align-items: center; gap: 12px; }
+.viewers { font-size: 13px; color: var(--muted); }
+.conn-badge {
+	font-size: 11px; padding: 2px 8px; border-radius: 10px;
+	border: 1px solid var(--border); color: var(--muted);
+}
+.conn-badge.on { color: var(--green); border-color: rgba(74,222,128,.4); }
+.conn-badge.off { color: var(--red); border-color: rgba(248,113,113,.4); }
+
+/* ---- layout ---- */
+
+#layout { display: flex; flex: 1 1 auto; min-height: 0; }
+
+#stage {
+	position: relative;
+	flex: 1 1 auto;
+	min-width: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--bg);
+	overflow: hidden;
+}
+#board { display: block; }
+
+/* ---- HUD sidebar ---- */
+
+#hud {
+	flex: 0 0 320px;
+	background: var(--panel);
+	border-left: 1px solid var(--border);
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	overflow-y: auto;
+}
+.hud-section { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.hud-section.grow { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 120px; }
+.hud-heading {
+	font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+	color: var(--muted); margin-bottom: 8px;
+	display: flex; align-items: center; gap: 8px; flex-direction: row-reverse; justify-content: flex-end;
+}
+.mission-state {
+	font-size: 10px; padding: 1px 8px; border-radius: 9px;
+	background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+}
+.mission-state.RUNNING, .mission-state.ARMED { color: var(--yellow); border-color: rgba(251,191,36,.4); }
+.mission-state.ALL_GREEN { color: var(--green); border-color: rgba(74,222,128,.4); }
+.mission-state.ABORTED { color: var(--red); border-color: rgba(248,113,113,.4); }
+
+#checklist { list-style: none; }
+#checklist li {
+	display: flex; align-items: center; gap: 8px;
+	font-size: 13px; padding: 5px 0; color: var(--muted);
+}
+#checklist li .dot {
+	width: 9px; height: 9px; border-radius: 50%;
+	background: var(--gray); flex: 0 0 auto;
+}
+#checklist li.AVAILABLE { color: var(--text); }
+#checklist li.AVAILABLE .dot { background: var(--yellow); animation: pulse 1.2s infinite; }
+#checklist li.EXECUTING, #checklist li.VERIFYING { color: var(--text); }
+#checklist li.EXECUTING .dot, #checklist li.VERIFYING .dot { background: var(--yellow); animation: pulse .6s infinite; }
+#checklist li.DONE { color: var(--text); }
+#checklist li.DONE .dot { background: var(--green); }
+#checklist li.FAILED { color: var(--red); }
+#checklist li.FAILED .dot { background: var(--red); }
+#checklist li .retries { font-size: 11px; color: var(--red); margin-left: auto; }
+
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+.links a {
+	display: block; font-size: 13px; color: var(--accent);
+	text-decoration: none; padding: 3px 0; word-break: break-all;
+}
+.links a:hover { text-decoration: underline; }
+.links:empty { display: none; }
+
+#missionLog {
+	flex: 1 1 auto; overflow-y: auto; font-size: 12px;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	color: var(--muted); line-height: 1.5; min-height: 80px; max-height: 40vh;
+}
+#missionLog .line { padding: 1px 0; border-bottom: 1px dotted rgba(35,42,54,.5); }
+#missionLog .line time { color: #565e6d; margin-right: 6px; font-size: 10px; }
+
+/* ---- admin ---- */
+
+.btn {
+	font-size: 13px; padding: 7px 12px; border-radius: 6px;
+	border: 1px solid var(--border); background: var(--panel-2);
+	color: var(--text); cursor: pointer; width: 100%; margin-top: 6px;
+}
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: #3b2a63; border-color: var(--accent); }
+.btn.danger { background: #4a1d1d; border-color: var(--red); color: #fecaca; }
+.btn.subtle { background: transparent; color: var(--muted); width: auto; padding: 4px 10px; font-size: 12px; }
+#adminPanel input {
+	width: 100%; padding: 7px 10px; font-size: 13px; border-radius: 6px;
+	border: 1px solid var(--border); background: var(--bg); color: var(--text);
+	margin-top: 4px;
+}
+#adminMsg { font-size: 12px; color: var(--yellow); margin-top: 6px; min-height: 16px; }
+.hidden { display: none !important; }
+
+/* ---- neural panel ---- */
+
+#neuralPanel {
+	flex: 0 0 auto; background: var(--panel);
+	border-top: 1px solid var(--border);
+}
+#neuralPanel button#neuralToggle {
+	width: 100%; text-align: left; background: none; border: none;
+	color: var(--muted); font-size: 12px; padding: 8px 16px; cursor: pointer;
+}
+#neuralPanel button#neuralToggle:hover { color: var(--text); }
+#neuralPanel .chev { float: right; transition: transform .2s; }
+#neuralPanel.collapsed .chev { transform: rotate(180deg); }
+#spikeCanvas { display: block; width: 100%; height: 140px; }
+#neuralPanel.collapsed #spikeCanvas { display: none; }
+
+/* ---- celebration ---- */
+
+#celebration {
+	position: absolute; inset: 0; pointer-events: none; overflow: hidden;
+}
+#celebration span {
+	position: absolute; top: -30px; font-size: 18px;
+	animation: confetti-fall linear forwards;
+}
+@keyframes confetti-fall {
+	to { transform: translateY(110vh) rotate(720deg); opacity: .6; }
+}
+
+/* ---- small screens ---- */
+
+@media (max-width: 900px) {
+	#layout { flex-direction: column; overflow-y: auto; }
+	#hud { flex: 0 0 auto; border-left: none; border-top: 1px solid var(--border); }
+	#topbar .scale { display: none; }
+}
