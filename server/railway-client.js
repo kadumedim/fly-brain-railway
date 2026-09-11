@@ -1,8 +1,17 @@
 /* railway-client.js
  *
  * Zero-dependency GraphQL client for Railway's public API
- * (https://backboard.railway.com/graphql/v2). Requires an account/workspace
- * token (project tokens cannot projectCreate).
+ * (https://backboard.railway.com/graphql/v2).
+ *
+ * In-project model: the fly service is deployed INSIDE the project it builds.
+ * A project token (scoped to exactly that project + environment) is all it
+ * needs -- it authenticates via the `Project-Access-Token` header. Account /
+ * workspace tokens (`Authorization: Bearer`) also work; set
+ * RAILWAY_TOKEN_TYPE=account for those. Default is `project`.
+ *
+ * The project/environment the fly operates on comes from Railway's
+ * auto-injected RAILWAY_PROJECT_ID / RAILWAY_ENVIRONMENT_ID env vars, with a
+ * projectToken-query fallback (project tokens know their own scope).
  *
  * DRY_RUN=1 short-circuits every mutation: operations are logged, plausible
  * fake ids are returned, and deployments fake SUCCESS ~10s after deploy.
@@ -19,15 +28,13 @@ const ENDPOINT = 'https://backboard.railway.com/graphql/v2';
 function createRailwayClient(opts) {
 	opts = opts || {};
 	const token = opts.token || process.env.RAILWAY_TOKEN || '';
-	const teamId = opts.teamId || process.env.RAILWAY_TEAM_ID || '';
+	const tokenType = opts.tokenType || process.env.RAILWAY_TOKEN_TYPE || 'project';
 	const dryRun = opts.dryRun !== undefined ? opts.dryRun : process.env.DRY_RUN === '1';
 	const log = opts.log || function () {};
 
 	/* ---- dry-run fake state ---- */
 	const DRY_DEPLOY_MS = Number(process.env.DRY_RUN_DEPLOY_MS || 10000);
 	const dryState = {
-		projectId: null,
-		environmentId: null,
 		services: {}, // serviceId -> {name, deployedAt, failLeft}
 		serviceSeq: 0,
 	};
@@ -37,14 +44,20 @@ function createRailwayClient(opts) {
 		if (m[0]) dryFail[m[0]] = Number(m[1] || 1);
 	});
 
+	function authHeaders() {
+		if (tokenType === 'project') {
+			return { 'Project-Access-Token': token };
+		}
+		return { 'Authorization': 'Bearer ' + token };
+	}
+
 	async function gql(query, variables) {
 		if (!token) throw new Error('RAILWAY_TOKEN is not configured');
+		const headers = Object.assign(
+			{ 'Content-Type': 'application/json' }, authHeaders());
 		const res = await fetch(ENDPOINT, {
 			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'Authorization': 'Bearer ' + token,
-			},
+			headers: headers,
 			body: JSON.stringify({ query: query, variables: variables || {} }),
 		});
 		const rateRemaining = res.headers.get('x-ratelimit-remaining');
@@ -68,49 +81,33 @@ function createRailwayClient(opts) {
 		return { data: body.data, rateRemaining: rateRemaining !== null ? Number(rateRemaining) : null };
 	}
 
+	/* ---- project context ---- */
+
+	// Resolves the project/environment the fly operates on. Priority:
+	// Railway's auto-injected env vars, then (project tokens only) asking the
+	// API what scope the token is bound to.
+	async function resolveProjectContext() {
+		if (dryRun) {
+			return { projectId: 'dry-project', environmentId: 'dry-env' };
+		}
+		if (process.env.RAILWAY_PROJECT_ID && process.env.RAILWAY_ENVIRONMENT_ID) {
+			return {
+				projectId: process.env.RAILWAY_PROJECT_ID,
+				environmentId: process.env.RAILWAY_ENVIRONMENT_ID,
+			};
+		}
+		if (tokenType === 'project') {
+			const q = `query projectToken { projectToken { projectId environmentId } }`;
+			const r = await gql(q, {});
+			return {
+				projectId: r.data.projectToken.projectId,
+				environmentId: r.data.projectToken.environmentId,
+			};
+		}
+		throw new Error('Cannot resolve project: set RAILWAY_PROJECT_ID + RAILWAY_ENVIRONMENT_ID (auto-injected when running on Railway)');
+	}
+
 	/* ---- operations ---- */
-
-	async function projectCreate(name) {
-		if (dryRun) {
-			log('[dry-run] projectCreate name=' + name);
-			dryState.projectId = 'dry-project-' + Date.now().toString(36);
-			dryState.environmentId = 'dry-env';
-			return { projectId: dryState.projectId, environmentId: dryState.environmentId };
-		}
-		const input = { name: name };
-		if (teamId) input.teamId = teamId;
-		const q = `mutation projectCreate($input: ProjectCreateInput!) {
-			projectCreate(input: $input) {
-				id
-				environments { edges { node { id name } } }
-			}
-		}`;
-		const r = await gql(q, { input: input });
-		const p = r.data.projectCreate;
-		const envs = p.environments.edges.map(function (e) { return e.node; });
-		const env = envs.find(function (e) { return e.name === 'production'; }) || envs[0];
-		if (!env) throw new Error('projectCreate returned no environments');
-		return { projectId: p.id, environmentId: env.id };
-	}
-
-	// Best-effort: make the project publicly viewable so spectators can verify
-	// on Railway's own dashboard. Schema availability of isPublic can drift.
-	async function projectMakePublic(projectId) {
-		if (dryRun) {
-			log('[dry-run] projectUpdate isPublic=true');
-			return true;
-		}
-		const q = `mutation projectUpdate($id: String!, $input: ProjectUpdateInput!) {
-			projectUpdate(id: $id, input: $input) { id isPublic }
-		}`;
-		try {
-			await gql(q, { id: projectId, input: { isPublic: true } });
-			return true;
-		} catch (err) {
-			log('projectUpdate(isPublic) failed -- toggle it manually in project settings: ' + err.message);
-			return false;
-		}
-	}
 
 	async function serviceCreate(projectId, name, image) {
 		if (dryRun) {
@@ -128,6 +125,19 @@ function createRailwayClient(opts) {
 		}`;
 		const r = await gql(q, { input: { projectId: projectId, name: name, source: { image: image } } });
 		return { serviceId: r.data.serviceCreate.id };
+	}
+
+	async function serviceDelete(serviceId, environmentId) {
+		if (dryRun) {
+			log('[dry-run] serviceDelete ' + serviceId);
+			delete dryState.services[serviceId];
+			return true;
+		}
+		const q = `mutation serviceDelete($id: String!, $environmentId: String) {
+			serviceDelete(id: $id, environmentId: $environmentId)
+		}`;
+		await gql(q, { id: serviceId, environmentId: environmentId });
+		return true;
 	}
 
 	async function variableUpsert(projectId, environmentId, serviceId, name, value) {
@@ -244,31 +254,19 @@ function createRailwayClient(opts) {
 		if (svc && svc.failLeft > 0) svc.failLeft--;
 	}
 
-	async function projectDelete(projectId) {
-		if (dryRun) {
-			log('[dry-run] projectDelete ' + projectId);
-			dryState.services = {};
-			dryState.projectId = null;
-			return true;
-		}
-		const q = `mutation projectDelete($id: String!) { projectDelete(id: $id) }`;
-		await gql(q, { id: projectId });
-		return true;
-	}
-
 	return {
 		dryRun: dryRun,
 		tokenConfigured: !!token,
+		tokenType: tokenType,
 		gql: gql,
-		projectCreate: projectCreate,
-		projectMakePublic: projectMakePublic,
+		resolveProjectContext: resolveProjectContext,
 		serviceCreate: serviceCreate,
+		serviceDelete: serviceDelete,
 		variableUpsert: variableUpsert,
 		serviceInstanceUpdate: serviceInstanceUpdate,
 		serviceInstanceDeploy: serviceInstanceDeploy,
 		serviceDomainCreate: serviceDomainCreate,
 		projectStatus: projectStatus,
-		projectDelete: projectDelete,
 		dryRunAckFailure: dryRunAckFailure,
 	};
 }

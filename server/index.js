@@ -111,15 +111,24 @@ function sendJson(res, code, obj) {
 function readBody(req) {
 	return new Promise(function (resolve) {
 		let data = '';
+		let done = false;
+		function finish(v) { if (!done) { done = true; resolve(v); } }
 		req.on('data', function (c) {
+			if (done) return;
 			data += c;
-			if (data.length > 65536) { req.destroy(); resolve(null); }
+			if (data.length > 65536) {
+				req.removeAllListeners('data');
+				req.removeAllListeners('end');
+				try { req.destroy(); } catch (e) { /* ignore */ }
+				finish(null);
+			}
 		});
 		req.on('end', function () {
-			try { resolve(data ? JSON.parse(data) : {}); }
-			catch (e) { resolve(null); }
+			if (done) return;
+			try { finish(data ? JSON.parse(data) : {}); }
+			catch (e) { finish(null); }
 		});
-		req.on('error', function () { resolve(null); });
+		req.on('error', function () { finish(null); });
 	});
 }
 
@@ -158,12 +167,15 @@ const MIME = {
 
 function serveStatic(req, res, urlPath) {
 	if (urlPath === '/') urlPath = '/index.html';
+	const normalized = path.posix.normalize(urlPath);
 	// Only the spectator app is served; sim data/server code stay private.
-	if (!/^\/(index\.html|css\/|js\/)/.test(urlPath)) {
+	// Check the normalized path so /css/../server/... cannot escape.
+	if (!/^\/(index\.html|css\/.+|js\/.+)/.test(normalized) || normalized.includes('..')) {
 		res.writeHead(404); res.end('not found'); return;
 	}
-	const filePath = path.join(ROOT, path.normalize(urlPath).replace(/^(\.\.[/\\])+/, ''));
-	if (!filePath.startsWith(ROOT)) { res.writeHead(403); res.end(); return; }
+	const rel = normalized.replace(/^\//, '');
+	const filePath = path.join(ROOT, rel);
+	if (filePath !== ROOT && !filePath.startsWith(ROOT + path.sep)) { res.writeHead(403); res.end(); return; }
 	fs.readFile(filePath, function (err, buf) {
 		if (err) { res.writeHead(404); res.end('not found'); return; }
 		res.writeHead(200, {
@@ -233,7 +245,7 @@ const server = http.createServer(async function (req, res) {
 				if (!client.dryRun && !client.tokenConfigured) {
 					return sendJson(res, 409, { ok: false, error: 'RAILWAY_TOKEN not configured (set DRY_RUN=1 to demo without one)' });
 				}
-				const r = mission.start();
+				const r = await mission.start();
 				return sendJson(res, r.ok ? 200 : (r.code || 500), r);
 			}
 			if (p === '/api/mission/teardown') {

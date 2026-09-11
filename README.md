@@ -2,15 +2,18 @@
 
 A **real spiking simulation of the full fruit-fly brain** — all 139,255
 neurons and ~2.7M synaptic connections of the FlyWire FAFB v783 connectome —
-whose **emergent behavior deploys a real multi-service app on Railway** via
-the public GraphQL API. And the whole thing runs *on* Railway: a
-fly-on-Railway that deploys-to-Railway.
+whose **emergent behavior builds a real multi-service app on Railway** via
+the public GraphQL API.
+
+The fly service is deployed **inside the very project it builds**: it spawns
+postgres, redis, web and worker as sibling services next to itself, using a
+project-scoped token. Open the project on Railway's dashboard and you watch
+the fly's neighbors pop into existence around it — the dashboard *is* the
+proof.
 
 Everyone watches **one shared fly**. The server runs the single authoritative
 simulation (LIF sim in a `worker_thread` + behavior loop) and broadcasts state
-over SSE; browsers are pure renderers. Viewers need no Railway account, and
-the project the fly creates is made **public read-only** on Railway so
-spectators can verify on Railway's own dashboard that the services are real.
+over SSE; browsers are pure renderers. Viewers need no Railway account.
 
 ## How it works (the honest architecture)
 
@@ -18,7 +21,7 @@ Like every viral connectome demo (Beat Saber, Doom, MK64…), there's a scaffold
 and a brain, and the split is explicit:
 
 - A **mission state machine** defines *what* step is next
-  (create project → Postgres → Redis → Web → Worker → wire variables).
+  (Postgres → Redis → Web → Worker → wire variables).
 - The **brain decides when and how**: each pending step manifests as *food*
   at that service's node on a Railway-style canvas. The fly's real hunger
   drive routes spikes `OLF_ORN_FOOD / GUS_GRN_SWEET → connectome →
@@ -29,6 +32,8 @@ and a brain, and the split is explicit:
 - Deployment failures inject a one-shot **NOCI nociception stimulus** — the
   fly startles away from the failed node (emergent), then the step re-arms.
 - When all four services are green: **ALL GREEN**, confetti, and a live URL.
+- **SWAT** deletes only the services the fly created — never the fly's own
+  service — so the fly survives its own teardown and can run again.
 
 The only knob the mission touches inside the brain: while a step is pending
 it clamps `hunger ≥ 0.75` (the existing feed-entry path is
@@ -52,45 +57,58 @@ makes the redis deploy fail once → watch the NOCI startle and the retry.
 
 ## Run it for real
 
-1. Create a Railway **account or workspace token**
-   (Account settings → Tokens). Project tokens can't `projectCreate`.
-2. **Verify the schema first** (Railway's API drifts):
+1. **Create a Railway project** (empty is fine) and deploy this repo as a
+   service in it — Railway picks up the `Dockerfile` + `railway.json`.
+2. In the project: **Settings → Tokens → create a project token** for the
+   `production` environment. Project tokens are scoped to exactly this
+   project — the fly cannot touch anything else on your account.
+3. On the fly service, set:
+   - `RAILWAY_TOKEN` = the project token
+   - `ADMIN_PASSWORD` = something secret (gates start/SWAT on the public URL)
+4. (Recommended) **Verify the schema first** — Railway's API drifts:
    ```sh
-   RAILWAY_TOKEN=... node scripts/schema-smoke-test.js          # introspection only
-   RAILWAY_TOKEN=... node scripts/schema-smoke-test.js --live   # + throwaway project (created & deleted)
+   RAILWAY_TOKEN=<project token> node scripts/schema-smoke-test.js          # introspection only
+   RAILWAY_TOKEN=<project token> node scripts/schema-smoke-test.js --live   # + throwaway service (created & deleted)
    ```
-3. Start the server:
-   ```sh
-   RAILWAY_TOKEN=... ADMIN_PASSWORD=change-me node server/index.js
-   ```
-4. Open the app, enter the admin password, hit **Start mission** (twice).
-5. When you're done: **SWAT** deletes the created project.
+5. Open the fly service's public URL, enter the admin password, hit
+   **Start mission** (twice). Watch the project's dashboard fill up.
+6. Optionally toggle the project to **public** in its settings so spectators
+   can verify the services are real on Railway's own dashboard.
+7. Done? **SWAT** deletes the spawned services (the fly stays).
 
 ⚠️ **This creates real services on your Railway account.** The four services
 (postgres:16-alpine, redis:7-alpine, nginx:alpine, busybox:stable) are tiny
 but not free forever — tear down when done (`SWAT`, or set
-`TEARDOWN_AFTER_MIN`). A full run makes <60 API requests (fits the free tier's
-100/h; Hobby recommended).
+`TEARDOWN_AFTER_MIN`). A full run makes <60 API requests (fits the free
+tier's 100/h; Hobby recommended). `RAILWAY_PROJECT_ID` /
+`RAILWAY_ENVIRONMENT_ID` are auto-injected by Railway; locally the project
+token itself tells the fly its scope.
+
+Why `ADMIN_PASSWORD` even with a scoped token: the spectator URL is public,
+and without the gate any visitor could POST `/api/mission/start` and spawn
+billable services in your project (or SWAT your demo mid-run). The token
+never reaches browsers; the password is just the trigger guard.
 
 ### Environment variables
 
 | var | meaning |
 |---|---|
-| `RAILWAY_TOKEN` | account/workspace token (server-side only, never sent to browsers) |
-| `RAILWAY_TEAM_ID` | optional — create the project in a team/workspace |
-| `ADMIN_PASSWORD` | gates all POSTs (`x-fly-admin` header). **Required for public deploys** — without it anyone can spend your money |
+| `RAILWAY_TOKEN` | **project token** (server-side only, never sent to browsers) |
+| `RAILWAY_TOKEN_TYPE` | `project` (default) or `account` — controls the auth header |
+| `ADMIN_PASSWORD` | gates all POSTs (`x-fly-admin` header). **Required for public deploys** |
 | `PORT` | listen port (default 8080) |
 | `DRY_RUN=1` | log mutations, fake SUCCESS — full demo without a token |
 | `DRY_RUN_FAIL` | e.g. `redis:1` — force n failures for a service (dry-run) |
 | `TEARDOWN_AFTER_MIN` | auto-SWAT n minutes after ALL GREEN |
-| `MISSION_PROJECT_NAME` | created project's name (default `fly-deployed-app`) |
 
-## Deploy the demo itself on Railway
+## Deploy as a template
 
-The repo ships a `Dockerfile` + `railway.json` (healthcheck `/api/health`,
-zero npm dependencies). Create a Railway service from this repo, set
-`RAILWAY_TOKEN` + `ADMIN_PASSWORD` on it, deploy, then open the public URL
-from any device and spectate. Optionally make the *host* project public too.
+Make it one-click: publish this repo, then in Railway create a **template**
+containing a single service built from the repo, with `RAILWAY_TOKEN` and
+`ADMIN_PASSWORD` as required inputs. Each deployer gets their own project,
+their own fly, and a token scoped to just that project. (The deployer creates
+the project token after the first deploy and pastes it in — tokens are minted
+per-project, so the template can only prompt for it, not pre-fill it.)
 
 ## Architecture
 

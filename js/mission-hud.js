@@ -189,7 +189,7 @@
 		},
 		function () { post('/api/mission/start', { confirm: true }); });
 
-	armButton(swatBtn, '⚠ REALLY delete the project?', function () {
+	armButton(swatBtn, '⚠ REALLY delete the spawned services?', function () {
 		post('/api/mission/teardown');
 	});
 

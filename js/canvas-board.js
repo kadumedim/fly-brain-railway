@@ -108,7 +108,6 @@
 	}
 
 	var STEP_SUBTITLES = {
-		'create-project': 'projectCreate',
 		'postgres': 'postgres:16-alpine',
 		'redis': 'redis:7-alpine',
 		'web': 'nginx:alpine + domain',
@@ -117,13 +116,42 @@
 	};
 
 	var STEP_ICONS = {
-		'create-project': '📦',
 		'postgres': '🐘',
 		'redis': '🟥',
 		'web': '🌐',
 		'worker': '🐝',
 		'wire-vars': '🧵',
 	};
+
+	// The fly's own service: it lives in the same project it's building.
+	var HOME_NODE = { x: 800, y: 150 };
+
+	function drawHomeCard() {
+		var x = HOME_NODE.x - CARD_W / 2;
+		var y = HOME_NODE.y - CARD_H / 2;
+
+		roundRect(x, y, CARD_W, CARD_H, 10);
+		ctx.fillStyle = COLORS.card;
+		ctx.fill();
+		ctx.lineWidth = 1.5;
+		ctx.strokeStyle = COLORS.accent;
+		ctx.stroke();
+
+		ctx.fillStyle = COLORS.text;
+		ctx.font = '600 14px ui-sans-serif, system-ui';
+		ctx.textBaseline = 'middle';
+		ctx.textAlign = 'left';
+		ctx.fillText('🪰 fly-brain', x + 14, y + 22);
+
+		ctx.fillStyle = COLORS.muted;
+		ctx.font = '11px ui-monospace, monospace';
+		ctx.fillText('this app — you are here', x + 14, y + 41);
+
+		ctx.beginPath();
+		ctx.arc(x + CARD_W - 16, y + 16, 4, 0, Math.PI * 2);
+		ctx.fillStyle = COLORS.green;
+		ctx.fill();
+	}
 
 	function drawCard(step, statuses, t) {
 		var v = stepVisual(step, statuses);
@@ -278,6 +306,7 @@
 			drawGrid();
 
 			var steps = STREAM.mission.steps;
+			drawHomeCard();
 			drawEdges(steps);
 			for (var i = 0; i < steps.length; i++) {
 				drawCard(steps[i], STREAM.mission.serviceStatuses || {}, t);

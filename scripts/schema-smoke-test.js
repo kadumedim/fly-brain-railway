@@ -4,14 +4,17 @@
  * Phase-3 gate: Railway's GraphQL schema drifts, so before the fly is allowed
  * to run a REAL mission, verify every mutation/query shape this project uses
  * against the live API. Uses introspection first (no side effects), then
- * optionally a full throwaway happy-path run.
+ * optionally a real throwaway service in the current project.
  *
- *   RAILWAY_TOKEN=... node scripts/schema-smoke-test.js            # introspection only
- *   RAILWAY_TOKEN=... node scripts/schema-smoke-test.js --live     # + real throwaway project
+ *   RAILWAY_TOKEN=<project token> node scripts/schema-smoke-test.js          # introspection only
+ *   RAILWAY_TOKEN=<project token> node scripts/schema-smoke-test.js --live   # + real throwaway service
  *
- * --live creates a real project named fly-smoke-test-<ts>, deploys all four
- * services, waits for green, then DELETES the project. Costs a few cents of
- * usage at most; requires an account/workspace token.
+ * Set RAILWAY_TOKEN_TYPE=account to test with an account/workspace token
+ * (Bearer auth) instead of the default project token (Project-Access-Token).
+ *
+ * --live creates a real redis service named fly-smoke-test-<ts> in the
+ * token's project, waits for it to go green, then DELETES it. Costs a few
+ * cents of usage at most. Run it in the project you deployed the fly into.
  */
 'use strict';
 
@@ -27,14 +30,12 @@ if (!token) {
 const client = createRailwayClient({ token: token, dryRun: false, log: console.log });
 
 const CHECKS = [
-	{ kind: 'mutation', name: 'projectCreate', wantArgs: ['input'] },
-	{ kind: 'mutation', name: 'projectUpdate', wantArgs: ['id', 'input'] },
-	{ kind: 'mutation', name: 'projectDelete', wantArgs: ['id'] },
-	{ kind: 'mutation', name: 'serviceCreate', wantArgs: ['input'] },
-	{ kind: 'mutation', name: 'variableUpsert', wantArgs: ['input'] },
-	{ kind: 'mutation', name: 'serviceInstanceUpdate', wantArgs: ['serviceId', 'environmentId', 'input'] },
-	{ kind: 'mutation', name: 'serviceInstanceDeployV2', wantArgs: ['serviceId', 'environmentId'] },
-	{ kind: 'mutation', name: 'serviceDomainCreate', wantArgs: ['input'] },
+	{ name: 'serviceCreate', wantArgs: ['input'] },
+	{ name: 'serviceDelete', wantArgs: ['id', 'environmentId'] },
+	{ name: 'variableUpsert', wantArgs: ['input'] },
+	{ name: 'serviceInstanceUpdate', wantArgs: ['serviceId', 'environmentId', 'input'] },
+	{ name: 'serviceInstanceDeployV2', wantArgs: ['serviceId', 'environmentId'] },
+	{ name: 'serviceDomainCreate', wantArgs: ['input'] },
 ];
 
 async function introspectFields(typeName) {
@@ -57,6 +58,17 @@ async function introspectInput(typeName) {
 
 async function main() {
 	let failures = 0;
+	console.log('token type: ' + client.tokenType);
+
+	console.log('== resolving project context ==');
+	let ctx;
+	try {
+		ctx = await client.resolveProjectContext();
+		console.log('✓ project ' + ctx.projectId + ' / environment ' + ctx.environmentId);
+	} catch (e) {
+		console.log('✗ cannot resolve project: ' + e.message);
+		failures++;
+	}
 
 	console.log('== introspecting Mutation fields ==');
 	const mutations = await introspectFields('Mutation');
@@ -79,7 +91,6 @@ async function main() {
 
 	console.log('== input type shapes ==');
 	const inputChecks = [
-		['ProjectUpdateInput', ['isPublic']],
 		['ServiceCreateInput', ['projectId', 'name', 'source']],
 		['VariableUpsertInput', ['projectId', 'environmentId', 'serviceId', 'name', 'value']],
 		['ServiceInstanceUpdateInput', ['startCommand']],
@@ -95,20 +106,23 @@ async function main() {
 		const missing = want.filter(w => fields.indexOf(w) === -1);
 		if (missing.length) {
 			console.log('✗ ' + type + ' missing fields: ' + missing.join(', '));
-			// isPublic absence is survivable (mission logs a manual-toggle hint)
-			if (!(type === 'ProjectUpdateInput' && missing.length === 1 && missing[0] === 'isPublic')) failures++;
-			else console.log('  (non-fatal: mission will log a manual-toggle hint instead)');
+			failures++;
 		} else {
 			console.log('✓ ' + type + ' has ' + want.join(', '));
 		}
 	}
 
-	console.log('== token viability: viewer query ==');
-	try {
-		const r = await client.gql('query { me { name email } }', {});
-		console.log('✓ authenticated as ' + (r.data.me.name || r.data.me.email));
-	} catch (e) {
-		console.log('✗ me query failed: ' + e.message + ' (workspace/team token? that can be fine)');
+	console.log('== combined status query ==');
+	if (ctx) {
+		try {
+			const st = await client.projectStatus(ctx.projectId, ctx.environmentId);
+			console.log('✓ projectStatus: ' + (st.services.length
+				? st.services.map(s => s.name + '=' + s.status).join(' ')
+				: '(no services yet)'));
+		} catch (e) {
+			console.log('✗ projectStatus failed: ' + e.message);
+			failures++;
+		}
 	}
 
 	if (failures) {
@@ -118,32 +132,26 @@ async function main() {
 	console.log('\nAll schema checks passed.');
 
 	if (process.argv.indexOf('--live') === -1) {
-		console.log('Run with --live for a full throwaway happy-path (creates + deletes a real project).');
+		console.log('Run with --live for a full throwaway happy-path (creates + deletes a real service in this project).');
 		return;
 	}
 
 	/* ---- live throwaway happy path ---- */
-	console.log('\n== LIVE throwaway run ==');
+	console.log('\n== LIVE throwaway service ==');
 	const poller = createPoller(client, { log: console.log });
 	const name = 'fly-smoke-test-' + Date.now().toString(36);
-	const proj = await client.projectCreate(name);
-	console.log('project ' + proj.projectId + ' env ' + proj.environmentId);
+	const svc = await client.serviceCreate(ctx.projectId, name, 'redis:7-alpine');
+	console.log('service ' + name + ' = ' + svc.serviceId + ' -- waiting for deploy...');
 	try {
-		await client.projectMakePublic(proj.projectId);
-
-		for (const [svcName, image] of [['redis', 'redis:7-alpine']]) {
-			const svc = await client.serviceCreate(proj.projectId, svcName, image);
-			console.log('service ' + svcName + ' = ' + svc.serviceId + ' -- waiting for deploy...');
-			const r = await poller.waitForDeploy(proj.projectId, proj.environmentId, svc.serviceId, function (services) {
-				console.log('  poll: ' + services.map(s => s.name + '=' + s.status).join(' '));
-			}, 5 * 60 * 1000);
-			console.log(svcName + ' final: ' + r.status);
-			if (r.status !== 'SUCCESS') throw new Error(svcName + ' did not go green');
-		}
+		const r = await poller.waitForDeploy(ctx.projectId, ctx.environmentId, svc.serviceId, function (services) {
+			console.log('  poll: ' + services.map(s => s.name + '=' + s.status).join(' '));
+		}, 5 * 60 * 1000);
+		console.log('final: ' + r.status);
+		if (r.status !== 'SUCCESS') throw new Error('throwaway service did not go green');
 		console.log('happy path OK');
 	} finally {
-		console.log('deleting throwaway project...');
-		await client.projectDelete(proj.projectId);
+		console.log('deleting throwaway service...');
+		await client.serviceDelete(svc.serviceId, ctx.environmentId);
 		console.log('deleted.');
 	}
 }

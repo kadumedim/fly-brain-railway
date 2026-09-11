@@ -1,11 +1,20 @@
 /* mission.js
  *
- * Mission state machine. Defines WHAT step is next; the brain decides WHEN
- * and HOW: each pending step manifests as food at that service's node on the
- * board. When the fly's emergent feed behavior finishes eating the food, the
- * step's real Railway GraphQL mutations fire (in-process). Deploy failures
- * trigger the NOCI nociception pathway (emergent startle), then the step
- * re-arms after a cooldown.
+ * Mission state machine (in-project model). The fly service is deployed
+ * INSIDE the Railway project it builds: the mission spawns postgres, redis,
+ * web and worker as sibling services next to the fly itself, using a
+ * project-scoped token. The project's own dashboard is the live proof.
+ *
+ * The mission defines WHAT step is next; the brain decides WHEN and HOW:
+ * each pending step manifests as food at that service's node on the board.
+ * When the fly's emergent feed behavior finishes eating the food, the step's
+ * real Railway GraphQL mutations fire (in-process). Deploy failures trigger
+ * the NOCI nociception pathway (emergent startle), then the step re-arms
+ * after a cooldown.
+ *
+ * SWAT (teardown) deletes ONLY the services the fly created -- never the
+ * fly's own service (RAILWAY_SERVICE_ID) -- so the fly survives its own swat
+ * and the mission can run again.
  *
  * Mission: IDLE -> ARMED -> RUNNING -> ALL_GREEN -> TORN_DOWN (+ ABORTED)
  * Steps:   LOCKED -> AVAILABLE -> EXECUTING -> VERIFYING -> DONE | FAILED
@@ -20,22 +29,16 @@ const MAX_RETRIES = 3;
 
 const STEP_DEFS = [
 	{
-		id: 'create-project',
-		title: 'Create project',
-		node: { x: 800, y: 150 },
-		serviceName: null,
-	},
-	{
 		id: 'postgres',
 		title: 'Deploy Postgres',
-		node: { x: 280, y: 320 },
+		node: { x: 280, y: 300 },
 		serviceName: 'postgres',
 		image: 'postgres:16-alpine',
 	},
 	{
 		id: 'redis',
 		title: 'Deploy Redis',
-		node: { x: 1320, y: 320 },
+		node: { x: 1320, y: 300 },
 		serviceName: 'redis',
 		image: 'redis:7-alpine',
 	},
@@ -67,8 +70,9 @@ function createMission(deps) {
 	const poller = deps.poller;
 	const emit = deps.emit || function () {};
 	const logSink = deps.log || function () {};
-	const projectName = deps.projectName || process.env.MISSION_PROJECT_NAME || 'fly-deployed-app';
 	const teardownAfterMin = Number(deps.teardownAfterMin || process.env.TEARDOWN_AFTER_MIN || 0);
+	// The fly's own service -- teardown must never touch it.
+	const ownServiceId = deps.ownServiceId || process.env.RAILWAY_SERVICE_ID || null;
 
 	const state = {
 		mission: 'IDLE',
@@ -103,6 +107,21 @@ function createMission(deps) {
 		return state.steps.find(function (s) { return s.id === id; });
 	}
 
+	// Unique ids of services the mission created (wire-vars shares worker's)
+	function spawnedServiceIds() {
+		const ids = [];
+		for (const st of state.steps) {
+			if (st.serviceId && ids.indexOf(st.serviceId) === -1 && st.serviceId !== ownServiceId) {
+				ids.push(st.serviceId);
+			}
+		}
+		return ids;
+	}
+
+	function missionActive() {
+		return state.mission === 'RUNNING' || state.mission === 'ARMED';
+	}
+
 	function log(line) {
 		const entry = { ts: Date.now(), line: line };
 		state.log.push(entry);
@@ -130,7 +149,8 @@ function createMission(deps) {
 
 	function onStatuses(services) {
 		for (const svc of services) {
-			// Map by known service names only (dry-run uses the same names)
+			// Only the services the mission owns; ignores the fly's own service
+			// and anything else living in the project.
 			if (['postgres', 'redis', 'web', 'worker'].indexOf(svc.name) !== -1) {
 				setServiceStatus(svc.name, svc.status);
 			}
@@ -167,20 +187,6 @@ function createMission(deps) {
 
 	async function executeStep(st) {
 		switch (st.id) {
-		case 'create-project': {
-			const r = await client.projectCreate(projectName);
-			state.projectId = r.projectId;
-			state.environmentId = r.environmentId;
-			state.projectUrl = client.dryRun
-				? null
-				: 'https://railway.com/project/' + r.projectId;
-			emit({ kind: 'project', projectId: state.projectId, projectUrl: state.projectUrl });
-			log('📦 projectCreate OK -- project ' + r.projectId);
-			const pub = await client.projectMakePublic(r.projectId);
-			if (pub) log('🌍 Project set public (read-only) -- spectators can verify on Railway\'s dashboard');
-			stepDone(st);
-			return;
-		}
 		case 'postgres': {
 			if (!st.serviceId) {
 				const r = await client.serviceCreate(state.projectId, 'postgres', stepDef(st.id).image);
@@ -261,6 +267,8 @@ function createMission(deps) {
 		setStepState(st, 'VERIFYING');
 		const r = await poller.waitForDeploy(
 			state.projectId, state.environmentId, st.serviceId, onStatuses);
+		// A mid-verify SWAT/abort wins: don't advance or retry a dead mission
+		if (!missionActive()) return;
 		if (r.status === 'SUCCESS') {
 			setServiceStatus(serviceName, 'SUCCESS');
 			stepDone(st);
@@ -292,7 +300,7 @@ function createMission(deps) {
 		}
 		log('⏲️ Retrying "' + st.title + '" in ' + (FAILURE_COOLDOWN_MS / 1000) + 's (attempt ' + (st.retries + 1) + '/' + MAX_RETRIES + ')');
 		setTimeout(function () {
-			if (state.mission === 'RUNNING' || state.mission === 'ARMED') {
+			if (missionActive()) {
 				makeAvailable(st);
 			}
 		}, FAILURE_COOLDOWN_MS);
@@ -310,9 +318,10 @@ function createMission(deps) {
 		const allGreen = names.every(function (n) { return state.serviceStatuses[n] === 'SUCCESS'; });
 		if (allGreen) {
 			setMissionState('ALL_GREEN');
+			behavior.setHungerFloor(0);
 			behavior.celebrate();
 			emit({ kind: 'celebration', domain: state.webDomain, projectUrl: state.projectUrl });
-			log('🎉 ALL GREEN -- the fly brain deployed a ' + names.length + '-service app on Railway!');
+			log('🎉 ALL GREEN -- the fly brain built a 4-service app around itself on Railway!');
 			if (state.webDomain) log('🌐 Live at https://' + state.webDomain);
 			if (teardownAfterMin > 0) {
 				log('⏲️ Auto-teardown in ' + teardownAfterMin + ' min');
@@ -325,43 +334,70 @@ function createMission(deps) {
 
 	/* ---- public API ---- */
 
-	function start() {
+	async function start() {
 		if (state.mission !== 'IDLE' && state.mission !== 'TORN_DOWN' && state.mission !== 'ABORTED') {
 			return { ok: false, code: 409, error: 'mission already ' + state.mission };
 		}
-		if (state.projectId) {
-			return { ok: false, code: 409, error: 'previous project still exists -- teardown first' };
+		if (spawnedServiceIds().length > 0) {
+			return { ok: false, code: 409, error: 'previously spawned services still exist -- teardown first' };
+		}
+		try {
+			const ctx = await client.resolveProjectContext();
+			state.projectId = ctx.projectId;
+			state.environmentId = ctx.environmentId;
+			state.projectUrl = client.dryRun ? null : 'https://railway.com/project/' + ctx.projectId;
+		} catch (err) {
+			return { ok: false, code: 409, error: err.message };
 		}
 		resetInternal();
 		state.startedAt = Date.now();
 		setMissionState('ARMED');
-		log('🎬 Mission armed' + (client.dryRun ? ' (DRY RUN -- no real mutations)' : ' -- REAL Railway deploys ahead'));
+		emit({ kind: 'project', projectId: state.projectId, projectUrl: state.projectUrl });
+		log('🎬 Mission armed' + (client.dryRun ? ' (DRY RUN -- no real mutations)' : ' -- the fly will build REAL services around itself in project ' + state.projectId));
+		if (!client.dryRun) {
+			log('🌍 Tip: set this project to public in its settings so spectators can verify on Railway\'s dashboard');
+		}
 		makeAvailable(state.steps[0]);
 		return { ok: true };
 	}
 
 	async function teardown() {
 		if (teardownTimer) { clearTimeout(teardownTimer); teardownTimer = null; }
-		if (!state.projectId) {
-			return { ok: false, code: 409, error: 'no project to tear down' };
+		const ids = spawnedServiceIds();
+		if (ids.length === 0) {
+			if (missionActive()) {
+				// Nothing spawned yet -- swat just calls off the hunt
+				setMissionState('ABORTED');
+				behavior.clearFood();
+				behavior.setHungerFloor(0);
+				log('🖐️ SWAT! Mission called off before anything was spawned.');
+				return { ok: true };
+			}
+			return { ok: false, code: 409, error: 'no spawned services to tear down' };
 		}
-		try {
-			log('🖐️ SWAT! Deleting project ' + state.projectId + '...');
-			await client.projectDelete(state.projectId);
-			state.projectId = null;
-			state.projectUrl = null;
-			state.webDomain = null;
-			state.serviceStatuses = {};
-			behavior.clearFood();
-			behavior.setHungerFloor(0);
-			setMissionState('TORN_DOWN');
-			emit({ kind: 'services', statuses: {} });
-			log('🗑️ Project deleted. The fly rests.');
-			return { ok: true };
-		} catch (err) {
-			log('❌ Teardown failed: ' + err.message);
-			return { ok: false, code: 502, error: err.message };
+		// Flip state first so any in-flight verify loop stands down
+		setMissionState('TORN_DOWN');
+		log('🖐️ SWAT! Deleting ' + ids.length + ' spawned service(s) -- the fly itself survives...');
+		const failures = [];
+		for (const id of ids) {
+			try {
+				await client.serviceDelete(id, state.environmentId);
+			} catch (err) {
+				failures.push(id + ': ' + err.message);
+			}
 		}
+		if (failures.length) {
+			log('❌ Teardown incomplete: ' + failures.join('; '));
+			return { ok: false, code: 502, error: 'some services not deleted: ' + failures.join('; ') };
+		}
+		for (const st of state.steps) st.serviceId = null;
+		state.webDomain = null;
+		state.serviceStatuses = {};
+		behavior.clearFood();
+		behavior.setHungerFloor(0);
+		emit({ kind: 'services', statuses: {} });
+		log('🗑️ Spawned services deleted. The fly rests on the empty canvas.');
+		return { ok: true };
 	}
 
 	function resetInternal() {
@@ -373,17 +409,16 @@ function createMission(deps) {
 		}
 		state.serviceStatuses = {};
 		state.webDomain = null;
-		state.projectUrl = null;
 		pgPassword = null;
 		behavior.clearFood();
 		behavior.setHungerFloor(0);
 	}
 
 	function reset() {
-		if (state.projectId) {
-			return { ok: false, code: 409, error: 'project still exists -- teardown first' };
+		if (spawnedServiceIds().length > 0) {
+			return { ok: false, code: 409, error: 'spawned services still exist -- teardown first' };
 		}
-		if (state.mission === 'RUNNING' || state.mission === 'ARMED') {
+		if (missionActive()) {
 			return { ok: false, code: 409, error: 'mission is running -- teardown first' };
 		}
 		resetInternal();
