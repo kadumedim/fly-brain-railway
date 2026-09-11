@@ -48,6 +48,14 @@ async function introspectFields(typeName) {
 	return r.data.__type.fields;
 }
 
+async function introspectFieldNames(typeName) {
+	const q = `query t($name: String!) {
+		__type(name: $name) { fields { name } }
+	}`;
+	const r = await client.gql(q, { name: typeName });
+	return r.data.__type ? (r.data.__type.fields || []).map(f => f.name) : null;
+}
+
 async function introspectInput(typeName) {
 	const q = `query t($name: String!) {
 		__type(name: $name) { inputFields { name } }
@@ -112,7 +120,15 @@ async function main() {
 		}
 	}
 
-	console.log('== combined status query ==');
+	console.log('== status query shapes ==');
+	const siFields = await introspectFieldNames('ServiceInstance');
+	if (siFields && siFields.indexOf('latestDeployment') !== -1) {
+		console.log('✓ ServiceInstance.latestDeployment exists (primary poll shape)');
+	} else {
+		console.log('- ServiceInstance.latestDeployment missing -- poller will fall back to deployments query');
+	}
+
+	console.log('== combined status query (live) ==');
 	if (ctx) {
 		try {
 			const st = await client.projectStatus(ctx.projectId, ctx.environmentId);
@@ -120,7 +136,7 @@ async function main() {
 				? st.services.map(s => s.name + '=' + s.status).join(' ')
 				: '(no services yet)'));
 		} catch (e) {
-			console.log('✗ projectStatus failed: ' + e.message);
+			console.log('✗ projectStatus failed (both shapes): ' + e.message);
 			failures++;
 		}
 	}

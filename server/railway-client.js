@@ -201,8 +201,72 @@ function createRailwayClient(opts) {
 		return { domain: r.data.serviceDomainCreate.domain };
 	}
 
-	// One combined query: latest deployment status for every service in the project.
+	// One combined query: latest deployment status for every service in the
+	// project. Railway's schema has drifted here before (Service.deployments
+	// lost its `input` arg), so two shapes are tried and the winner is cached:
+	//   1. services -> serviceInstances -> latestDeployment
+	//   2. top-level deployments(input:{projectId, environmentId}) joined
+	//      against the project's service list
 	// Returns { services: [{serviceId, name, status}], rateRemaining }
+	let statusQueryMode = null; // 'instances' | 'deployments'
+
+	async function statusViaInstances(projectId, environmentId) {
+		const q = `query projectStatus($id: String!) {
+			project(id: $id) {
+				services {
+					edges {
+						node {
+							id
+							name
+							serviceInstances {
+								edges { node { environmentId latestDeployment { id status } } }
+							}
+						}
+					}
+				}
+			}
+		}`;
+		const r = await gql(q, { id: projectId });
+		const services = r.data.project.services.edges.map(function (e) {
+			const insts = e.node.serviceInstances.edges.map(function (x) { return x.node; });
+			const inst = insts.find(function (n) { return n.environmentId === environmentId; }) || insts[0];
+			return {
+				serviceId: e.node.id,
+				name: e.node.name,
+				status: inst && inst.latestDeployment ? inst.latestDeployment.status : 'NONE',
+			};
+		});
+		return { services: services, rateRemaining: r.rateRemaining };
+	}
+
+	async function statusViaDeployments(projectId, environmentId) {
+		const qNames = `query serviceNames($id: String!) {
+			project(id: $id) { services { edges { node { id name } } } }
+		}`;
+		const rNames = await gql(qNames, { id: projectId });
+		const qDeps = `query deployments($input: DeploymentListInput!) {
+			deployments(first: 50, input: $input) {
+				edges { node { id status serviceId } }
+			}
+		}`;
+		const rDeps = await gql(qDeps, { input: { projectId: projectId, environmentId: environmentId } });
+		const latestByService = {};
+		for (const e of rDeps.data.deployments.edges) {
+			// connection is newest-first; keep the first status seen per service
+			if (!(e.node.serviceId in latestByService)) {
+				latestByService[e.node.serviceId] = e.node.status;
+			}
+		}
+		const services = rNames.data.project.services.edges.map(function (e) {
+			return {
+				serviceId: e.node.id,
+				name: e.node.name,
+				status: latestByService[e.node.id] || 'NONE',
+			};
+		});
+		return { services: services, rateRemaining: rDeps.rateRemaining };
+	}
+
 	async function projectStatus(projectId, environmentId) {
 		if (dryRun) {
 			const services = Object.keys(dryState.services).map(function (id) {
@@ -219,32 +283,18 @@ function createRailwayClient(opts) {
 			});
 			return { services: services, rateRemaining: null };
 		}
-		const q = `query projectStatus($id: String!, $environmentId: String!) {
-			project(id: $id) {
-				services {
-					edges {
-						node {
-							id
-							name
-							deployments(first: 1, input: { environmentId: $environmentId }) {
-								edges { node { id status } }
-							}
-						}
-					}
-				}
+		if (statusQueryMode !== 'deployments') {
+			try {
+				const r = await statusViaInstances(projectId, environmentId);
+				statusQueryMode = 'instances';
+				return r;
+			} catch (err) {
+				if (statusQueryMode === 'instances') throw err; // shape known-good; real error
+				log('instances status query failed (' + err.message + ') -- falling back to deployments query');
+				statusQueryMode = 'deployments';
 			}
-		}`;
-		const r = await gql(q, { id: projectId, environmentId: environmentId });
-		const services = r.data.project.services.edges.map(function (e) {
-			const node = e.node;
-			const dep = node.deployments.edges[0];
-			return {
-				serviceId: node.id,
-				name: node.name,
-				status: dep ? dep.node.status : 'NONE',
-			};
-		});
-		return { services: services, rateRemaining: r.rateRemaining };
+		}
+		return statusViaDeployments(projectId, environmentId);
 	}
 
 	// Dry-run helper: consume one forced failure after mission acknowledges it,
