@@ -113,6 +113,17 @@ body { display: flex; flex-direction: column; }
 
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 
+#missionStats {
+	display: flex; gap: 14px; flex-wrap: wrap;
+	margin-top: 8px; padding-top: 8px;
+	border-top: 1px dotted var(--border);
+	font-size: 11px; color: var(--muted);
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+#missionStats:empty { display: none; }
+#missionStats b { color: var(--text); font-weight: 600; }
+#missionStats .best b { color: var(--green); }
+
 .links a {
 	display: block; font-size: 13px; color: var(--accent);
 	text-decoration: none; padding: 3px 0; word-break: break-all;

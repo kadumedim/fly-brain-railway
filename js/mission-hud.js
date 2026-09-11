@@ -25,7 +25,30 @@
 	var resetBtn = document.getElementById('resetBtn');
 	var adminMsg = document.getElementById('adminMsg');
 
+	var statsEl = document.getElementById('missionStats');
 	var renderedLogCount = 0;
+
+	function fmtMs(ms) {
+		var s = Math.round(ms / 1000);
+		return Math.floor(s / 60) + 'm' + String(s % 60).padStart(2, '0') + 's';
+	}
+
+	function renderStats() {
+		var m = STREAM.mission;
+		if (!m) return;
+		var st = m.stats || {};
+		var html = '';
+		var running = m.mission === 'RUNNING' || m.mission === 'ARMED';
+		if (running && m.startedAt) {
+			html += '<span>⏱ <b>' + fmtMs(Date.now() - m.startedAt) + '</b></span>';
+		}
+		if (st.lastMs != null) html += '<span>last <b>' + fmtMs(st.lastMs) + '</b></span>';
+		if (st.bestMs != null) html += '<span class="best">best <b>' + fmtMs(st.bestMs) + '</b></span>';
+		if (st.runs > 0) html += '<span>runs <b>' + st.runs + '</b></span>';
+		if (m.autoLoop) html += '<span>∞ auto-loop</span>';
+		statsEl.innerHTML = html;
+	}
+	setInterval(renderStats, 1000);
 
 	function esc(s) {
 		var d = document.createElement('span');
@@ -115,6 +138,7 @@
 		renderChecklist();
 		renderLinks();
 		renderLog(true);
+		renderStats();
 	});
 
 	STREAM.on('connection', function (up) {
