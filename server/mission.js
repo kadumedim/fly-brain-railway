@@ -49,7 +49,9 @@ const STEP_DEFS = [
 		title: 'Deploy Web',
 		node: { x: 280, y: 650 },
 		serviceName: 'web',
-		image: 'nginx:alpine',
+		// WEB_IMAGE: point at a custom prebuilt image (see web/ -- the
+		// "deployed by a fly" Next.js page); default stays instant-green nginx
+		image: process.env.WEB_IMAGE || 'nginx:alpine',
 	},
 	{
 		id: 'worker',
@@ -65,6 +67,14 @@ const STEP_DEFS = [
 		serviceName: 'worker',
 	},
 ];
+
+// Custom web images (Next.js fly-web) listen on 3000; nginx on 80
+const WEB_PORT = Number(process.env.WEB_PORT || (process.env.WEB_IMAGE ? 3000 : 80));
+
+// Single source of truth for which services the mission owns
+const SERVICE_NAMES = STEP_DEFS
+	.map(function (d) { return d.serviceName; })
+	.filter(function (n, i, a) { return n && a.indexOf(n) === i; });
 
 function createMission(deps) {
 	const behavior = deps.behavior;
@@ -107,24 +117,63 @@ function createMission(deps) {
 	let pgPassword = null;
 	let teardownTimer = null;
 	let executing = false;
+	// Run generation: bumped on every start/teardown/reset. In-flight async
+	// work (verify polls, retry timers, meals) from a superseded generation
+	// must stand down instead of corrupting the next run.
+	let runGen = 0;
 
-	/* ---- stats persistence (best time survives redeploys if a Railway
-	 * volume is mounted at /data; silently in-memory-only otherwise) ---- */
+	/* ---- persistence (best time + spawned service ids survive redeploys if
+	 * a Railway volume is mounted at /data; in-memory-only otherwise) ---- */
 	const statsFile = process.env.STATS_FILE || '/data/fly-stats.json';
 	let statsPersist = true;
+	let persistedSpawned = {}; // serviceName -> serviceId, from a previous process
 	try {
 		const saved = JSON.parse(fs.readFileSync(statsFile, 'utf8'));
 		state.stats.runs = saved.runs || 0;
 		state.stats.lastMs = saved.lastMs || null;
 		state.stats.bestMs = saved.bestMs || null;
+		persistedSpawned = saved.spawned || {};
 		logSink('Loaded persisted stats: ' + JSON.stringify(state.stats));
 	} catch (e) { /* first boot or no volume */ }
+
+	/* ---- run history: append-only JSONL on the volume, one record per
+	 * completed run ({t, ms, retries, best}); unlimited tracking ---- */
+	const runsFile = process.env.RUNS_FILE || path.join(path.dirname(statsFile), 'fly-runs.jsonl');
+	let runsPersist = true;
+	let recentRuns = [];
+	try {
+		const raw = fs.readFileSync(runsFile, 'utf8');
+		recentRuns = raw.split('\n').filter(Boolean).slice(-50).map(function (l) { return JSON.parse(l); });
+		logSink('Loaded ' + recentRuns.length + ' persisted run record(s)');
+	} catch (e) { /* first boot or no volume */ }
+
+	function appendRunRecord(rec) {
+		recentRuns.push(rec);
+		if (recentRuns.length > 50) recentRuns.shift();
+		if (!runsPersist) return;
+		try {
+			fs.mkdirSync(path.dirname(runsFile), { recursive: true });
+			fs.appendFileSync(runsFile, JSON.stringify(rec) + '\n');
+		} catch (e) {
+			runsPersist = false;
+		}
+	}
 
 	function saveStats() {
 		if (!statsPersist) return;
 		try {
+			const spawned = {};
+			for (const st of state.steps) {
+				const def = stepDef(st.id);
+				if (st.serviceId && def.serviceName) spawned[def.serviceName] = st.serviceId;
+			}
 			fs.mkdirSync(path.dirname(statsFile), { recursive: true });
-			fs.writeFileSync(statsFile, JSON.stringify(state.stats));
+			fs.writeFileSync(statsFile, JSON.stringify({
+				runs: state.stats.runs,
+				lastMs: state.stats.lastMs,
+				bestMs: state.stats.bestMs,
+				spawned: spawned,
+			}));
 		} catch (e) {
 			statsPersist = false;
 			logSink('Stats persistence off (' + e.code + ' on ' + statsFile + ') -- mount a volume at /data to keep the leaderboard across redeploys');
@@ -182,9 +231,21 @@ function createMission(deps) {
 		for (const svc of services) {
 			// Only the services the mission owns; ignores the fly's own service
 			// and anything else living in the project.
-			if (['postgres', 'redis', 'web', 'worker'].indexOf(svc.name) !== -1) {
+			if (SERVICE_NAMES.indexOf(svc.name) !== -1) {
 				setServiceStatus(svc.name, svc.status);
 			}
+		}
+	}
+
+	// Latest deployment id for a service (null if none/unreachable); captured
+	// BEFORE triggering a deploy so verification never trusts a stale result.
+	async function currentDeploymentId(serviceId) {
+		try {
+			const status = await client.projectStatus(state.projectId, state.environmentId);
+			const svc = status.services.find(function (s) { return s.serviceId === serviceId; });
+			return svc ? svc.deploymentId : null;
+		} catch (err) {
+			return null;
 		}
 	}
 
@@ -201,7 +262,14 @@ function createMission(deps) {
 
 	async function onFoodConsumed(stepId) {
 		const st = step(stepId);
-		if (!st || st.state !== 'AVAILABLE' || executing) return;
+		if (!st || st.state !== 'AVAILABLE' || !missionActive()) return;
+		if (executing) {
+			// A previous generation's verify may still be winding down; the
+			// meal is already eaten, so put the food back rather than losing
+			// the step forever.
+			behavior.spawnFood(st.node.x, st.node.y, st.id);
+			return;
+		}
 		executing = true;
 		behavior.setHungerFloor(0);
 		setStepState(st, 'EXECUTING');
@@ -233,11 +301,13 @@ function createMission(deps) {
 		}
 		if (existingId) {
 			st.serviceId = existingId;
+			saveStats();
 			log('♻️ Adopting existing "' + name + '" service (left over from a previous run)');
 			return 'adopted';
 		}
 		const r = await client.serviceCreate(state.projectId, name, image);
 		st.serviceId = r.serviceId;
+		saveStats();
 		return 'created';
 	}
 
@@ -250,32 +320,50 @@ function createMission(deps) {
 				// Fresh password on create AND on adoption: no volume is attached,
 				// so a redeploy re-runs initdb and the new password takes effect.
 				pgPassword = crypto.randomBytes(18).toString('base64url');
-				await client.variableUpsert(state.projectId, state.environmentId, st.serviceId, 'POSTGRES_PASSWORD', pgPassword);
-				await client.variableUpsert(state.projectId, state.environmentId, st.serviceId, 'PGDATA', '/var/lib/postgresql/data/pgdata');
+				await Promise.all([
+					client.variableUpsert(state.projectId, state.environmentId, st.serviceId, 'POSTGRES_PASSWORD', pgPassword),
+					client.variableUpsert(state.projectId, state.environmentId, st.serviceId, 'PGDATA', '/var/lib/postgresql/data/pgdata'),
+				]);
 				log('🔐 POSTGRES_PASSWORD + PGDATA set (value not logged)');
 			}
+			const prevDep = how === 'created' ? null : await currentDeploymentId(st.serviceId);
 			await client.serviceInstanceDeploy(st.serviceId, state.environmentId);
 			log('🚀 postgres deploy triggered -- ⏳ waiting for green');
-			await verifyStep(st, 'postgres');
+			await verifyStep(st, 'postgres', prevDep);
 			return;
 		}
 		case 'redis': {
 			const how = await ensureService(st, 'redis', stepDef(st.id).image);
 			if (how === 'created') log('🟥 serviceCreate redis (redis:7-alpine) OK');
 			// serviceCreate does NOT auto-deploy (verified live) -- always trigger
+			const prevDep = how === 'created' ? null : await currentDeploymentId(st.serviceId);
 			await client.serviceInstanceDeploy(st.serviceId, state.environmentId);
 			log('🚀 redis deploying -- ⏳ waiting for green');
-			await verifyStep(st, 'redis');
+			await verifyStep(st, 'redis', prevDep);
 			return;
 		}
 		case 'web': {
-			const how = await ensureService(st, 'web', stepDef(st.id).image);
-			if (how === 'created') log('🌐 serviceCreate web (nginx:alpine) OK');
+			const image = stepDef(st.id).image;
+			const how = await ensureService(st, 'web', image);
+			if (how === 'created') log('🌐 serviceCreate web (' + image + ') OK');
+			if (how !== 'have' && process.env.WEB_IMAGE) {
+				// Custom fly-web image: bind Next to the domain's target port and
+				// give it a backlink to this fly (Railway injects our domain)
+				const vars = [
+					client.variableUpsert(state.projectId, state.environmentId, st.serviceId, 'PORT', String(WEB_PORT)),
+				];
+				if (process.env.RAILWAY_PUBLIC_DOMAIN) {
+					vars.push(client.variableUpsert(state.projectId, state.environmentId, st.serviceId,
+						'FLY_APP_URL', 'https://' + process.env.RAILWAY_PUBLIC_DOMAIN));
+				}
+				await Promise.all(vars);
+			}
 			// serviceCreate does NOT auto-deploy (verified live) -- always trigger
+			const prevDep = how === 'created' ? null : await currentDeploymentId(st.serviceId);
 			await client.serviceInstanceDeploy(st.serviceId, state.environmentId);
 			if (!state.webDomain) {
 				try {
-					const d = await client.serviceDomainCreate(st.serviceId, state.environmentId, 80);
+					const d = await client.serviceDomainCreate(st.serviceId, state.environmentId, WEB_PORT);
 					state.webDomain = d.domain;
 					emit({ kind: 'domain', domain: state.webDomain });
 					log('🔗 Domain created: https://' + d.domain);
@@ -307,15 +395,24 @@ function createMission(deps) {
 		case 'wire-vars': {
 			const workerStep = step('worker');
 			st.serviceId = workerStep.serviceId;
-			await client.variableUpsert(state.projectId, state.environmentId, st.serviceId,
-				'DATABASE_URL',
-				'postgresql://postgres:' + pgPassword + '@postgres.railway.internal:5432/postgres');
-			await client.variableUpsert(state.projectId, state.environmentId, st.serviceId,
-				'REDIS_URL', 'redis://redis.railway.internal:6379');
-			log('🧵 DATABASE_URL + REDIS_URL wired to worker via *.railway.internal');
+			// Railway reference variables: resolved at deploy time, keep the
+			// password out of the worker's own vars, and make the dashboard
+			// draw dashed dependency lines from worker to postgres/redis --
+			// the same edges our board renders at this step.
+			await Promise.all([
+				client.variableUpsert(state.projectId, state.environmentId, st.serviceId,
+					'DATABASE_URL',
+					'postgresql://postgres:${{postgres.POSTGRES_PASSWORD}}@${{postgres.RAILWAY_PRIVATE_DOMAIN}}:5432/postgres'),
+				client.variableUpsert(state.projectId, state.environmentId, st.serviceId,
+					'REDIS_URL', 'redis://${{redis.RAILWAY_PRIVATE_DOMAIN}}:6379'),
+			]);
+			log('🧵 DATABASE_URL + REDIS_URL wired via reference variables -- dashed lines incoming on the dashboard');
+			// The worker just went SUCCESS in the previous step -- without the
+			// exclusion the first poll would pass on that stale deployment.
+			const prevDep = await currentDeploymentId(st.serviceId);
 			await client.serviceInstanceDeploy(st.serviceId, state.environmentId);
 			log('🚀 worker redeploying with wired vars -- ⏳ waiting for green');
-			await verifyStep(st, 'worker');
+			await verifyStep(st, 'worker', prevDep);
 			return;
 		}
 		default:
@@ -323,12 +420,17 @@ function createMission(deps) {
 		}
 	}
 
-	async function verifyStep(st, serviceName) {
+	async function verifyStep(st, serviceName, excludeDeploymentId) {
 		setStepState(st, 'VERIFYING');
+		const gen = runGen;
 		const r = await poller.waitForDeploy(
-			state.projectId, state.environmentId, st.serviceId, onStatuses);
-		// A mid-verify SWAT/abort wins: don't advance or retry a dead mission
-		if (!missionActive()) return;
+			state.projectId, state.environmentId, st.serviceId, {
+				onStatuses: onStatuses,
+				excludeDeploymentId: excludeDeploymentId || null,
+				isCancelled: function () { return gen !== runGen || !missionActive(); },
+			});
+		// A mid-verify SWAT/abort/new-run wins: this generation stands down
+		if (gen !== runGen || !missionActive() || r.status === 'CANCELLED') return;
 		if (r.status === 'SUCCESS') {
 			setServiceStatus(serviceName, 'SUCCESS');
 			stepDone(st);
@@ -363,8 +465,10 @@ function createMission(deps) {
 			return;
 		}
 		log('⏲️ Retrying "' + st.title + '" in ' + (FAILURE_COOLDOWN_MS / 1000) + 's (attempt ' + (st.retries + 1) + '/' + MAX_RETRIES + ')');
+		const gen = runGen;
 		setTimeout(function () {
-			if (missionActive()) {
+			// Only re-arm the step for the run that scheduled this retry
+			if (gen === runGen && missionActive()) {
 				makeAvailable(st);
 			}
 		}, FAILURE_COOLDOWN_MS);
@@ -390,6 +494,8 @@ function createMission(deps) {
 			state.stats.lastMs = runMs;
 			const isBest = state.stats.bestMs === null || runMs < state.stats.bestMs;
 			if (isBest) state.stats.bestMs = runMs;
+			const totalRetries = state.steps.reduce(function (n, s) { return n + s.retries; }, 0);
+			appendRunRecord({ t: state.startedAt, ms: runMs, retries: totalRetries, best: isBest });
 			saveStats();
 			emit({ kind: 'stats', stats: state.stats });
 
@@ -442,6 +548,14 @@ function createMission(deps) {
 				return;
 			}
 			if (state.mission === 'IDLE' || state.mission === 'TORN_DOWN') {
+				// A partially-failed teardown leaves TORN_DOWN with services
+				// still recorded -- retry the teardown, never leak paid services
+				if (spawnedServiceIds().length > 0) {
+					log('🔁 Auto-loop: previous teardown incomplete -- retrying');
+					await teardown();
+					scheduleLoop(loopRestMs);
+					return;
+				}
 				const r = await start();
 				if (!r.ok) {
 					log('🔁 Auto-loop: cannot start (' + r.error + ') -- retrying in 10m');
@@ -482,14 +596,38 @@ function createMission(deps) {
 		} catch (err) {
 			return { ok: false, code: 409, error: err.message };
 		}
+		// Sweep leftovers: a redeploy of the fly wipes its in-memory state, so
+		// the project may still hold mission-owned services from a previous
+		// run. Prefer service ids persisted to the volume (provably ours);
+		// fall back to matching the mission's service names. Never the fly's
+		// own service; best-effort -- adoption covers anything that survives.
+		try {
+			const status = await client.projectStatus(state.projectId, state.environmentId);
+			const persistedIds = Object.keys(persistedSpawned).map(function (k) { return persistedSpawned[k]; });
+			const leftovers = status.services.filter(function (s) {
+				if (s.serviceId === ownServiceId) return false;
+				return persistedIds.indexOf(s.serviceId) !== -1 || SERVICE_NAMES.indexOf(s.name) !== -1;
+			});
+			if (leftovers.length) {
+				log('🧹 Clearing ' + leftovers.length + ' leftover service(s) from a previous run...');
+				const results = await Promise.allSettled(leftovers.map(function (svc) {
+					return client.serviceDelete(svc.serviceId, state.environmentId);
+				}));
+				results.forEach(function (r, i) {
+					if (r.status === 'rejected') {
+						log('⚠️ Could not delete leftover ' + leftovers[i].name + ': ' +
+							(r.reason && r.reason.message) + ' -- the fly will adopt it instead');
+					}
+				});
+			}
+			persistedSpawned = {};
+		} catch (err) { /* sweep is best-effort */ }
+		runGen++;
 		resetInternal();
 		state.startedAt = Date.now();
 		setMissionState('ARMED');
 		emit({ kind: 'project', projectId: state.projectId, projectUrl: state.projectUrl });
 		log('🎬 Mission armed' + (client.dryRun ? ' (DRY RUN -- no real mutations)' : ' -- the fly will build REAL services around itself in project ' + state.projectId));
-		if (!client.dryRun) {
-			log('🌍 Tip: set this project to public in its settings so spectators can verify on Railway\'s dashboard');
-		}
 		makeAvailable(state.steps[0]);
 		return { ok: true };
 	}
@@ -500,6 +638,7 @@ function createMission(deps) {
 		if (ids.length === 0) {
 			if (missionActive()) {
 				// Nothing spawned yet -- swat just calls off the hunt
+				runGen++;
 				setMissionState('ABORTED');
 				resetSteps();
 				behavior.clearFood();
@@ -509,26 +648,33 @@ function createMission(deps) {
 			}
 			return { ok: false, code: 409, error: 'no spawned services to tear down' };
 		}
-		// Flip state first so any in-flight verify loop stands down
+		// Invalidate this run FIRST: in-flight verify polls and retry timers
+		// stand down, and the board food goes away before the fly can finish
+		// a meal and fire a mutation into a dead mission.
+		runGen++;
 		setMissionState('TORN_DOWN');
+		behavior.clearFood();
+		behavior.setHungerFloor(0);
 		log('🖐️ SWAT! Deleting ' + ids.length + ' spawned service(s) -- the fly itself survives...');
+		const results = await Promise.allSettled(ids.map(function (id) {
+			return client.serviceDelete(id, state.environmentId);
+		}));
 		const failures = [];
-		for (const id of ids) {
-			try {
-				await client.serviceDelete(id, state.environmentId);
-			} catch (err) {
-				failures.push(id + ': ' + err.message);
+		results.forEach(function (r, i) {
+			if (r.status === 'rejected') {
+				failures.push(ids[i] + ': ' + (r.reason && r.reason.message));
 			}
-		}
+		});
 		if (failures.length) {
+			// serviceIds stay recorded; the auto-loop reconciler retries the
+			// teardown rather than leaking running (billing) services.
 			log('❌ Teardown incomplete: ' + failures.join('; '));
 			return { ok: false, code: 502, error: 'some services not deleted: ' + failures.join('; ') };
 		}
 		resetSteps();
+		saveStats();
 		state.webDomain = null;
 		state.serviceStatuses = {};
-		behavior.clearFood();
-		behavior.setHungerFloor(0);
 		emit({ kind: 'services', statuses: {} });
 		log('🗑️ Spawned services deleted. The fly rests on the empty canvas.');
 		return { ok: true };
@@ -561,6 +707,7 @@ function createMission(deps) {
 		if (missionActive()) {
 			return { ok: false, code: 409, error: 'mission is running -- teardown first' };
 		}
+		runGen++;
 		resetInternal();
 		setMissionState('IDLE');
 		log('🔄 Mission reset');
@@ -576,10 +723,11 @@ function createMission(deps) {
 			serviceStatuses: state.serviceStatuses,
 			startedAt: state.startedAt,
 			stats: state.stats,
+			runsHistory: recentRuns.slice(-20),
 			autoLoop: loopEnabled,
 			steps: state.steps.map(function (s) {
 				return {
-					id: s.id, title: s.title, node: s.node,
+					id: s.id, title: s.title, node: s.node, image: stepDef(s.id).image || null,
 					state: s.state, retries: s.retries, detail: s.detail,
 				};
 			}),

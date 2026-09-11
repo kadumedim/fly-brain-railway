@@ -11,6 +11,17 @@ const { parentPort } = require('node:worker_threads');
 global.self = {
 	onmessage: null,
 	postMessage: function (msg) {
+		// The host consumes only the 63-entry groupSpikeCounts; the full
+		// 139KB per-neuron fireState would otherwise be structured-cloned
+		// 10x/sec (~1.4MB/s of copy + GC churn) with zero consumers.
+		if (msg && msg.type === 'tick' && msg.fireState) {
+			msg = {
+				type: 'tick',
+				firedNeurons: msg.firedNeurons,
+				groupSpikeCounts: msg.groupSpikeCounts,
+				tickCount: msg.tickCount,
+			};
+		}
 		parentPort.postMessage(msg);
 	},
 };

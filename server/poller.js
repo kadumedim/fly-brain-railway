@@ -7,6 +7,8 @@
  */
 'use strict';
 
+const PENDING_STATUSES = ['BUILDING', 'DEPLOYING', 'QUEUED', 'WAITING', 'INITIALIZING', 'NONE'];
+
 function createPoller(client, opts) {
 	opts = opts || {};
 	const log = opts.log || function () {};
@@ -16,13 +18,28 @@ function createPoller(client, opts) {
 	/**
 	 * Polls the combined project-status query until the named service reaches
 	 * a terminal deployment state.
-	 * onStatuses (optional) receives every poll's full service list (for HUD).
-	 * Resolves {status: 'SUCCESS'|'FAILED'|'CRASHED'|'TIMEOUT', services}.
+	 *
+	 * waitOpts:
+	 *  - onStatuses(services): every poll's full service list (for the HUD)
+	 *  - excludeDeploymentId: a deployment that existed BEFORE this deploy was
+	 *    triggered -- its status (stale SUCCESS or FAILED) never counts;
+	 *    verification waits for a different deployment to appear
+	 *  - isCancelled(): checked each cycle; a torn-down/superseded mission
+	 *    stops its zombie poll instead of burning API calls for 10 minutes
+	 *  - timeoutMs (default 10 min)
+	 *
+	 * Resolves {status: 'SUCCESS'|'FAILED'|'CRASHED'|'REMOVED'|'TIMEOUT'|'CANCELLED', services}.
 	 */
-	async function waitForDeploy(projectId, environmentId, serviceId, onStatuses, timeoutMs) {
-		const deadline = Date.now() + (timeoutMs || 10 * 60 * 1000);
+	async function waitForDeploy(projectId, environmentId, serviceId, waitOpts) {
+		waitOpts = waitOpts || {};
+		const onStatuses = waitOpts.onStatuses || null;
+		const excludeId = waitOpts.excludeDeploymentId || null;
+		const isCancelled = waitOpts.isCancelled || function () { return false; };
+		const deadline = Date.now() + (waitOpts.timeoutMs || 10 * 60 * 1000);
 		let interval = baseMs;
+		const warnedStatuses = {};
 		for (;;) {
+			if (isCancelled()) return { status: 'CANCELLED', services: [] };
 			let result = null;
 			try {
 				result = await client.projectStatus(projectId, environmentId);
@@ -37,10 +54,17 @@ function createPoller(client, opts) {
 			if (result) {
 				if (onStatuses) onStatuses(result.services);
 				const svc = result.services.find(function (s) { return s.serviceId === serviceId; });
-				const status = svc ? svc.status : 'NONE';
+				const stale = svc && excludeId && svc.deploymentId === excludeId;
+				const status = svc && !stale ? svc.status : 'NONE';
 				if (status === 'SUCCESS') return { status: 'SUCCESS', services: result.services };
 				if (status === 'FAILED' || status === 'CRASHED' || status === 'REMOVED') {
 					return { status: status, services: result.services };
+				}
+				// Surface unrecognized statuses (schema drift) instead of
+				// letting them silently ride out the timeout
+				if (PENDING_STATUSES.indexOf(status) === -1 && !warnedStatuses[status]) {
+					warnedStatuses[status] = true;
+					log('unrecognized deployment status "' + status + '" for ' + serviceId + ' -- treating as pending');
 				}
 			}
 			if (Date.now() > deadline) return { status: 'TIMEOUT', services: result ? result.services : [] };

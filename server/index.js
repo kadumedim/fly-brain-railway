@@ -55,12 +55,16 @@ setInterval(function () {
 
 /* ---------- brain + behavior + mission ---------- */
 
-let latestSpikeTick = null;
-
 const host = createBrainHost({
 	log: log,
+	onFatal: function (err) {
+		// A dead sim means a zombie fly; exit so Railway's restart policy
+		// brings back a live one instead of health-checking a corpse.
+		console.error('FATAL: sim worker died:', err && err.message);
+		process.exit(1);
+	},
 	onSpikeTick: function (groupSpikeCounts, firedNeurons, tickCount) {
-		latestSpikeTick = tickCount;
+		if (sseClients.size === 0) return;
 		broadcast('spikes', {
 			t: tickCount,
 			n: firedNeurons,
@@ -84,8 +88,9 @@ host.ready.then(function () {
 	log('Brain online: ' + host.neuronCount + ' neurons / ' + host.edgeCount + ' edges (FlyWire FAFB v783)');
 	behavior.start();
 	mission.kickLoop();
-	// fly state at ~15Hz
+	// fly state at ~15Hz (payload only built when someone is watching)
 	setInterval(function () {
+		if (sseClients.size === 0) return;
 		broadcast('fly', behavior.getFlyState());
 	}, 66);
 }).catch(function (err) {
@@ -135,6 +140,7 @@ function readBody(req) {
 
 function fullSnapshot() {
 	return {
+		now: Date.now(), // lets clients normalize server timestamps to their clock
 		world: behavior.world,
 		brain: {
 			neuronCount: host.neuronCount,

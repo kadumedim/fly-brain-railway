@@ -455,7 +455,15 @@ function createBehavior(host, opts) {
 		},
 		setHungerFloor: function (v) { hungerFloor = v || 0; },
 		setOnFoodConsumed: function (fn) { onFoodConsumed = fn; },
-		triggerNociception: function () { BRAIN.stimulate.nociception = true; },
+		triggerNociception: function () {
+			// The FAFB dataset's NOCI population is empty (brain-only dataset),
+			// so the one-shot NOCI stimulus alone reaches zero neurons. Route
+			// the pain through the fear drive as well: DRIVE_FEAR stimulation +
+			// the virtual-drive bypass feed flightIntent/DN_STARTLE, and the
+			// startle selection + escape jump remain emergent.
+			BRAIN.stimulate.nociception = true;
+			BRAIN.drives.fear = Math.min(1, BRAIN.drives.fear + 0.6);
+		},
 		celebrate: function () {
 			// ALL GREEN: satiated + strong grooming urge -> victory grooming
 			BRAIN.drives.groom = 1.0;

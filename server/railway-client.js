@@ -230,10 +230,12 @@ function createRailwayClient(opts) {
 		const services = r.data.project.services.edges.map(function (e) {
 			const insts = e.node.serviceInstances.edges.map(function (x) { return x.node; });
 			const inst = insts.find(function (n) { return n.environmentId === environmentId; }) || insts[0];
+			const dep = inst && inst.latestDeployment;
 			return {
 				serviceId: e.node.id,
 				name: e.node.name,
-				status: inst && inst.latestDeployment ? inst.latestDeployment.status : 'NONE',
+				status: dep ? dep.status : 'NONE',
+				deploymentId: dep ? dep.id : null,
 			};
 		});
 		return { services: services, rateRemaining: r.rateRemaining };
@@ -252,19 +254,30 @@ function createRailwayClient(opts) {
 		const rDeps = await gql(qDeps, { input: { projectId: projectId, environmentId: environmentId } });
 		const latestByService = {};
 		for (const e of rDeps.data.deployments.edges) {
-			// connection is newest-first; keep the first status seen per service
+			// connection is newest-first; keep the first deployment seen per service
 			if (!(e.node.serviceId in latestByService)) {
-				latestByService[e.node.serviceId] = e.node.status;
+				latestByService[e.node.serviceId] = e.node;
 			}
 		}
 		const services = rNames.data.project.services.edges.map(function (e) {
+			const dep = latestByService[e.node.id];
 			return {
 				serviceId: e.node.id,
 				name: e.node.name,
-				status: latestByService[e.node.id] || 'NONE',
+				status: dep ? dep.status : 'NONE',
+				deploymentId: dep ? dep.id : null,
 			};
 		});
 		return { services: services, rateRemaining: rDeps.rateRemaining };
+	}
+
+	// Only genuine schema-shape rejections may switch the cached query shape;
+	// transient trouble (429, 5xx, network) must stay retryable on the
+	// primary shape or one blip poisons every future poll.
+	function isSchemaError(err) {
+		if (err.rateLimited) return false;
+		return /Unknown argument|Cannot query field|Unknown field|Unknown type|GRAPHQL_VALIDATION/i
+			.test(err.message || '');
 	}
 
 	async function projectStatus(projectId, environmentId) {
@@ -279,7 +292,8 @@ function createRailwayClient(opts) {
 						status = 'SUCCESS';
 					}
 				}
-				return { serviceId: id, name: svc.name, status: status };
+				// deploymentId changes per deploy, mirroring real exclusion semantics
+				return { serviceId: id, name: svc.name, status: status, deploymentId: 'dry-dep-' + svc.deployedAt };
 			});
 			return { services: services, rateRemaining: null };
 		}
@@ -289,8 +303,8 @@ function createRailwayClient(opts) {
 				statusQueryMode = 'instances';
 				return r;
 			} catch (err) {
-				if (statusQueryMode === 'instances') throw err; // shape known-good; real error
-				log('instances status query failed (' + err.message + ') -- falling back to deployments query');
+				if (!isSchemaError(err)) throw err; // transient; retry same shape later
+				log('instances status query rejected by schema (' + err.message + ') -- falling back to deployments query');
 				statusQueryMode = 'deployments';
 			}
 		}

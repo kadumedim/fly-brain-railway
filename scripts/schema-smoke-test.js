@@ -103,6 +103,8 @@ async function main() {
 		['VariableUpsertInput', ['projectId', 'environmentId', 'serviceId', 'name', 'value']],
 		['ServiceInstanceUpdateInput', ['startCommand']],
 		['ServiceDomainCreateInput', ['serviceId', 'environmentId', 'targetPort']],
+		// the runtime's fallback status query depends on this shape
+		['DeploymentListInput', ['projectId', 'environmentId']],
 	];
 	for (const [type, want] of inputChecks) {
 		const fields = await introspectInput(type);
@@ -157,11 +159,16 @@ async function main() {
 	const poller = createPoller(client, { log: console.log });
 	const name = 'fly-smoke-test-' + Date.now().toString(36);
 	const svc = await client.serviceCreate(ctx.projectId, name, 'redis:7-alpine');
-	console.log('service ' + name + ' = ' + svc.serviceId + ' -- waiting for deploy...');
+	console.log('service ' + name + ' = ' + svc.serviceId + ' -- triggering deploy...');
 	try {
-		const r = await poller.waitForDeploy(ctx.projectId, ctx.environmentId, svc.serviceId, function (services) {
-			console.log('  poll: ' + services.map(s => s.name + '=' + s.status).join(' '));
-		}, 5 * 60 * 1000);
+		// serviceCreate does NOT auto-deploy (verified live)
+		await client.serviceInstanceDeploy(svc.serviceId, ctx.environmentId);
+		const r = await poller.waitForDeploy(ctx.projectId, ctx.environmentId, svc.serviceId, {
+			onStatuses: function (services) {
+				console.log('  poll: ' + services.map(s => s.name + '=' + s.status).join(' '));
+			},
+			timeoutMs: 5 * 60 * 1000,
+		});
 		console.log('final: ' + r.status);
 		if (r.status !== 'SUCCESS') throw new Error('throwaway service did not go green');
 		console.log('happy path OK');
