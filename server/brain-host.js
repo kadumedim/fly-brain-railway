@@ -79,7 +79,20 @@ function createBrainHost(opts) {
 		worker.on('error', function (err) {
 			log('sim worker crashed: ' + (err && err.message));
 			workerReady = false;
-			if (!neuronCount) reject(err);
+			if (!neuronCount) {
+				reject(err);
+			} else if (opts.onFatal) {
+				// Post-startup crash: without this the fly freezes into a
+				// zombie while /api/health keeps reporting ok
+				opts.onFatal(err);
+			}
+		});
+		worker.on('exit', function (code) {
+			if (workerReady && code !== 0) {
+				workerReady = false;
+				log('sim worker exited with code ' + code);
+				if (opts.onFatal) opts.onFatal(new Error('sim worker exited with code ' + code));
+			}
 		});
 		worker.on('message', function (data) {
 			switch (data.type) {

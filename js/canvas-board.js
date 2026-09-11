@@ -42,6 +42,24 @@
 	/* ---- sizing ---- */
 
 	var viewScale = 1, offX = 0, offY = 0;
+	var gridCanvas = null; // static dot grid, rendered once per resize
+
+	function buildGrid() {
+		var world = STREAM.world;
+		var dpr = window.devicePixelRatio || 1;
+		gridCanvas = document.createElement('canvas');
+		gridCanvas.width = world.w * viewScale * dpr;
+		gridCanvas.height = world.h * viewScale * dpr;
+		var g = gridCanvas.getContext('2d');
+		g.setTransform(viewScale * dpr, 0, 0, viewScale * dpr, 0, 0);
+		g.fillStyle = COLORS.grid;
+		var gap = 36;
+		for (var x = gap / 2; x < world.w; x += gap) {
+			for (var y = gap / 2; y < world.h; y += gap) {
+				g.fillRect(x - 0.75, y - 0.75, 1.5, 1.5);
+			}
+		}
+	}
 
 	function resize() {
 		var dpr = window.devicePixelRatio || 1;
@@ -56,6 +74,7 @@
 		viewScale = Math.min(w / world.w, h / world.h);
 		offX = (w - world.w * viewScale) / 2;
 		offY = (h - world.h * viewScale) / 2;
+		buildGrid();
 	}
 	window.addEventListener('resize', resize);
 	STREAM.on('init', resize);
@@ -73,14 +92,10 @@
 	}
 
 	function drawGrid() {
+		if (!gridCanvas) return;
 		var world = STREAM.world;
-		var gap = 36;
-		ctx.fillStyle = COLORS.grid;
-		for (var x = gap / 2; x < world.w; x += gap) {
-			for (var y = gap / 2; y < world.h; y += gap) {
-				ctx.fillRect(x - 0.75, y - 0.75, 1.5, 1.5);
-			}
-		}
+		// one blit instead of ~1,100 fillRects per frame
+		ctx.drawImage(gridCanvas, 0, 0, world.w, world.h);
 	}
 
 	function stepVisual(step, statuses) {
@@ -183,10 +198,13 @@
 		ctx.textAlign = 'left';
 		ctx.fillText(STEP_ICONS[step.id] + ' ' + step.title, x + 14, y + 22);
 
-		// subtitle
+		// subtitle -- streamed image is authoritative (WEB_IMAGE etc.)
+		var subtitle = step.image || STEP_SUBTITLES[step.id] || '';
+		if (step.id === 'worker' && step.image) subtitle = step.image + ' · psql + redis-cli';
+		if (step.id === 'web' && step.image) subtitle = step.image + ' + domain';
 		ctx.fillStyle = COLORS.muted;
 		ctx.font = '11px ui-monospace, monospace';
-		ctx.fillText(STEP_SUBTITLES[step.id] || '', x + 14, y + 41);
+		ctx.fillText(subtitle, x + 14, y + 41);
 
 		// status pill
 		var pillText = v.pill;

@@ -104,10 +104,30 @@ never reaches browsers; the password is just the trigger guard.
 | `LOOP_LINGER_MIN` | auto-loop: minutes to admire the green board before SWAT (default 3) |
 | `LOOP_REST_MIN` | auto-loop: minutes of rest between runs (default 2) |
 | `STATS_FILE` | where run stats persist (default `/data/fly-stats.json` — mount a Railway volume at `/data` to keep best times across redeploys; in-memory otherwise) |
+| `RUNS_FILE` | append-only JSONL run history, one `{t, ms, retries, best}` record per completed run (default `/data/fly-runs.jsonl`, needs the same volume) |
+| `WEB_IMAGE` | custom image for the web step (see below); default `nginx:alpine` |
+| `WEB_PORT` | domain target port for the web service (default 3000 when `WEB_IMAGE` set, else 80) |
 
 The worker is an `alpine:3` container that actually uses the wiring: after
 the wire-vars step it runs a real `SELECT 1` against Postgres and a redis-cli
 `PING` every 30s — watch its logs on the dashboard.
+
+### Custom web page ("this site was deployed by a fly")
+
+`web/` contains a tiny Next.js app whose index proudly explains it was
+deployed by a fly, with a live backlink to the spectator app. Build and push
+it once, then point the mission at it:
+
+```sh
+cd web
+docker build -t ghcr.io/<you>/fly-web:latest .
+docker push ghcr.io/<you>/fly-web:latest   # make the package public
+```
+
+Set `WEB_IMAGE=ghcr.io/<you>/fly-web:latest` on the fly service. The mission
+then wires `PORT`/`FLY_APP_URL` onto the web service automatically and the
+domain targets the Next.js port. Left unset, the web step deploys plain
+`nginx:alpine` (instant green, default page).
 
 ⚠️ `AUTO_LOOP` means continuous real spend and steady API traffic (~3-4
 runs/hour ≈ 150-250 requests/h — above the free tier's 100/h; use Hobby).

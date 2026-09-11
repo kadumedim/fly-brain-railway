@@ -39,9 +39,9 @@
 			<code>OLF_ORN_FOOD</code>/<code>GUS_GRN_SWEET</code> neuron populations →
 			spikes cascade through the real connectome → feeding-circuit activity
 			drives the feed behavior. Zero the connectome and nothing deploys.</li>
-			<li>The walking, searching, grooming detours, and the startle after a
-			failed deploy (a nociception stimulus into the real <code>NOCI</code>
-			population) are all live simulation output — every run is different.</li>
+			<li>The walking, searching, grooming detours, and the startle escape
+			after a failed deploy are all live simulation output — every run is
+			different.</li>
 			<li>The Railway deployments are real GraphQL mutations, spending real
 			money — verify the services yourself on the project's public dashboard.</li>
 			<li>The spike raster below the board shows live per-group firing from
@@ -62,6 +62,10 @@
 			<li>The mission stacks the deck: while a step is pending, hunger is clamped
 			high and the food has a board-wide odor plume. The fly was always going to
 			want the food — but finding, reaching, and eating it is its own doing.</li>
+			<li>Deploy-failure "pain" enters via the fear drive, not pain neurons: the
+			dataset's <code>NOCI</code> population is empty (it's a brain-only dataset),
+			so failure spikes fear, which cascades into the startle circuit — the
+			decision to startle and the escape jump are emergent from there.</li>
 			<li>No learning: synaptic weights never change. Run 500 is statistically
 			identical to run 1 — the best-time board measures luck, not improvement.</li>
 		</ul>

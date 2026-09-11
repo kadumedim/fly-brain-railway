@@ -26,7 +26,6 @@
 	var adminMsg = document.getElementById('adminMsg');
 
 	var statsEl = document.getElementById('missionStats');
-	var renderedLogCount = 0;
 
 	function fmtMs(ms) {
 		var s = Math.round(ms / 1000);
@@ -40,7 +39,7 @@
 		var html = '';
 		var running = m.mission === 'RUNNING' || m.mission === 'ARMED';
 		if (running && m.startedAt) {
-			html += '<span>⏱ <b>' + fmtMs(Date.now() - m.startedAt) + '</b></span>';
+			html += '<span>⏱ <b>' + fmtMs(Math.max(0, Date.now() - m.startedAt)) + '</b></span>';
 		}
 		if (st.lastMs != null) html += '<span>last <b>' + fmtMs(st.lastMs) + '</b></span>';
 		if (st.bestMs != null) html += '<span class="best">best <b>' + fmtMs(st.bestMs) + '</b></span>';
@@ -85,29 +84,24 @@
 		linksEl.innerHTML = html;
 	}
 
-	function renderLog(reset) {
-		var m = STREAM.mission;
-		if (!m) return;
-		if (reset) {
-			logEl.innerHTML = '';
-			renderedLogCount = 0;
-		}
-		// Log array can be trimmed server-side; if ours is shorter, re-render all
-		if (renderedLogCount > m.log.length) {
-			logEl.innerHTML = '';
-			renderedLogCount = 0;
-		}
-		for (var i = renderedLogCount; i < m.log.length; i++) {
-			var e = m.log[i];
-			var div = document.createElement('div');
-			div.className = 'line';
-			var t = new Date(e.ts);
-			div.innerHTML = '<time>' + t.toTimeString().slice(0, 8) + '</time>' + esc(e.line);
-			logEl.appendChild(div);
-		}
-		renderedLogCount = m.log.length;
+	// Each SSE 'log' delta is appended directly (never diffed against the
+	// client-side ring buffer, whose capped length made the old index-based
+	// renderer freeze forever once it filled).
+	function appendLogLine(entry) {
+		var div = document.createElement('div');
+		div.className = 'line';
+		var t = new Date(entry.ts);
+		div.innerHTML = '<time>' + t.toTimeString().slice(0, 8) + '</time>' + esc(entry.line);
+		logEl.appendChild(div);
 		while (logEl.children.length > 200) logEl.removeChild(logEl.firstChild);
 		logEl.scrollTop = logEl.scrollHeight;
+	}
+
+	function rebuildLog() {
+		var m = STREAM.mission;
+		if (!m) return;
+		logEl.innerHTML = '';
+		for (var i = 0; i < m.log.length; i++) appendLogLine(m.log[i]);
 	}
 
 	function confetti() {
@@ -137,7 +131,7 @@
 		connEl.className = 'conn-badge on';
 		renderChecklist();
 		renderLinks();
-		renderLog(true);
+		rebuildLog();
 		renderStats();
 	});
 
@@ -152,7 +146,7 @@
 
 	STREAM.on('mission', function (evt) {
 		switch (evt.kind) {
-		case 'log': renderLog(); break;
+		case 'log': appendLogLine(evt); break;
 		case 'step':
 		case 'mission-state': renderChecklist(); break;
 		case 'project':

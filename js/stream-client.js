@@ -104,6 +104,11 @@
 			STREAM.world = snap.world;
 			STREAM.brain = snap.brain;
 			STREAM.mission = snap.mission;
+			// Normalize server-epoch startedAt to this client's clock so the
+			// run timer survives clock skew (delta handlers use client time)
+			if (snap.now && STREAM.mission.startedAt) {
+				STREAM.mission.startedAt = Date.now() - (snap.now - STREAM.mission.startedAt);
+			}
 			STREAM.viewers = snap.viewers;
 			STREAM.config = snap.config;
 			prevFly = null;
