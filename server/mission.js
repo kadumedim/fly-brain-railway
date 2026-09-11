@@ -185,13 +185,39 @@ function createMission(deps) {
 		}
 	}
 
+	// Ensure the step has a service: reuse tracked id, adopt a same-named
+	// service left over from a previous run (the fly's memory is in-process,
+	// so a redeploy of the fly must not create duplicates), or create fresh.
+	// Returns 'have' | 'adopted' | 'created'.
+	async function ensureService(st, name, image) {
+		if (st.serviceId) return 'have';
+		let existingId = null;
+		try {
+			const status = await client.projectStatus(state.projectId, state.environmentId);
+			const existing = status.services.find(function (s) { return s.name === name; });
+			if (existing) existingId = existing.serviceId;
+		} catch (err) {
+			// status query trouble shouldn't block creation; worst case Railway
+			// rejects the duplicate name and the step fails visibly
+		}
+		if (existingId) {
+			st.serviceId = existingId;
+			log('♻️ Adopting existing "' + name + '" service (left over from a previous run)');
+			return 'adopted';
+		}
+		const r = await client.serviceCreate(state.projectId, name, image);
+		st.serviceId = r.serviceId;
+		return 'created';
+	}
+
 	async function executeStep(st) {
 		switch (st.id) {
 		case 'postgres': {
-			if (!st.serviceId) {
-				const r = await client.serviceCreate(state.projectId, 'postgres', stepDef(st.id).image);
-				st.serviceId = r.serviceId;
-				log('🐘 serviceCreate postgres (postgres:16-alpine) OK');
+			const how = await ensureService(st, 'postgres', stepDef(st.id).image);
+			if (how === 'created') log('🐘 serviceCreate postgres (postgres:16-alpine) OK');
+			if (!pgPassword) {
+				// Fresh password on create AND on adoption: no volume is attached,
+				// so a redeploy re-runs initdb and the new password takes effect.
 				pgPassword = crypto.randomBytes(18).toString('base64url');
 				await client.variableUpsert(state.projectId, state.environmentId, st.serviceId, 'POSTGRES_PASSWORD', pgPassword);
 				await client.variableUpsert(state.projectId, state.environmentId, st.serviceId, 'PGDATA', '/var/lib/postgresql/data/pgdata');
@@ -203,9 +229,8 @@ function createMission(deps) {
 			return;
 		}
 		case 'redis': {
-			if (!st.serviceId) {
-				const r = await client.serviceCreate(state.projectId, 'redis', stepDef(st.id).image);
-				st.serviceId = r.serviceId;
+			const how = await ensureService(st, 'redis', stepDef(st.id).image);
+			if (how === 'created') {
 				log('🟥 serviceCreate redis (redis:7-alpine) OK');
 			} else {
 				await client.serviceInstanceDeploy(st.serviceId, state.environmentId);
@@ -215,25 +240,30 @@ function createMission(deps) {
 			return;
 		}
 		case 'web': {
-			if (!st.serviceId) {
-				const r = await client.serviceCreate(state.projectId, 'web', stepDef(st.id).image);
-				st.serviceId = r.serviceId;
+			const how = await ensureService(st, 'web', stepDef(st.id).image);
+			if (how === 'created') {
 				log('🌐 serviceCreate web (nginx:alpine) OK');
-				const d = await client.serviceDomainCreate(st.serviceId, state.environmentId, 80);
-				state.webDomain = d.domain;
-				emit({ kind: 'domain', domain: state.webDomain });
-				log('🔗 Domain created: https://' + d.domain);
 			} else {
 				await client.serviceInstanceDeploy(st.serviceId, state.environmentId);
+			}
+			if (!state.webDomain) {
+				try {
+					const d = await client.serviceDomainCreate(st.serviceId, state.environmentId, 80);
+					state.webDomain = d.domain;
+					emit({ kind: 'domain', domain: state.webDomain });
+					log('🔗 Domain created: https://' + d.domain);
+				} catch (err) {
+					// Adopted service may already have one from the previous run
+					log('🔗 Domain not created (' + err.message + ') -- check the service settings on Railway');
+				}
 			}
 			log('🚀 web deploying -- ⏳ waiting for green');
 			await verifyStep(st, 'web');
 			return;
 		}
 		case 'worker': {
-			if (!st.serviceId) {
-				const r = await client.serviceCreate(state.projectId, 'worker', stepDef(st.id).image);
-				st.serviceId = r.serviceId;
+			const how = await ensureService(st, 'worker', stepDef(st.id).image);
+			if (how === 'created') {
 				log('🐝 serviceCreate worker (busybox:stable) OK');
 				await client.serviceInstanceUpdate(st.serviceId, state.environmentId, {
 					startCommand: 'sh -c \'while true; do echo "[fly-worker] buzz"; sleep 30; done\'',
@@ -368,6 +398,7 @@ function createMission(deps) {
 			if (missionActive()) {
 				// Nothing spawned yet -- swat just calls off the hunt
 				setMissionState('ABORTED');
+				resetSteps();
 				behavior.clearFood();
 				behavior.setHungerFloor(0);
 				log('🖐️ SWAT! Mission called off before anything was spawned.');
@@ -390,7 +421,7 @@ function createMission(deps) {
 			log('❌ Teardown incomplete: ' + failures.join('; '));
 			return { ok: false, code: 502, error: 'some services not deleted: ' + failures.join('; ') };
 		}
-		for (const st of state.steps) st.serviceId = null;
+		resetSteps();
 		state.webDomain = null;
 		state.serviceStatuses = {};
 		behavior.clearFood();
@@ -400,13 +431,19 @@ function createMission(deps) {
 		return { ok: true };
 	}
 
-	function resetInternal() {
+	// Reset all steps to LOCKED, emitting each change so live HUDs update
+	// (teardown must not leave cards frozen at "deploying"/"done").
+	function resetSteps() {
 		for (const st of state.steps) {
-			st.state = 'LOCKED';
-			st.retries = 0;
 			st.serviceId = null;
+			st.retries = 0;
 			st.detail = '';
+			setStepState(st, 'LOCKED');
 		}
+	}
+
+	function resetInternal() {
+		resetSteps();
 		state.serviceStatuses = {};
 		state.webDomain = null;
 		pgPassword = null;
