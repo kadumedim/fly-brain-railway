@@ -5,6 +5,10 @@
  * one row per group, ordered by region (sensory / central / drives / motor),
  * brightness proportional to the group's fired fraction. Visually equivalent
  * to flybrain's full raster at 1/100th the bandwidth.
+ *
+ * Spike history accumulates in a ring buffer whether or not the panel is
+ * open, so collapsing and reopening (or resizing) repaints the full recent
+ * raster instead of starting from a blank canvas.
  */
 (function () {
 	'use strict';
@@ -22,13 +26,21 @@
 		motor: [74, 222, 128],     // green
 	};
 
-	var rows = null; // [{groupIdx, region}] in display order
+	var H = 140;
+	var LABEL_W = 64;
+	var COL_W = 2;
+	var HISTORY_MAX = 1024; // ~100s at 10Hz; more than any panel width shows
+
+	var rows = null;    // [{groupIdx, region}] in display order
 	var sized = false;
+	var history = [];   // ring of per-tick group-count arrays, newest last
 
 	toggle.addEventListener('click', function () {
 		panel.classList.toggle('collapsed');
 		if (!panel.classList.contains('collapsed')) sized = false;
 	});
+
+	window.addEventListener('resize', function () { sized = false; });
 
 	function buildRows() {
 		var brain = STREAM.brain;
@@ -45,60 +57,26 @@
 			' neurons — live spikes ';
 	}
 
-	function ensureSize() {
-		if (sized) return;
-		var dpr = window.devicePixelRatio || 1;
-		var w = panel.clientWidth;
-		var h = 140;
-		canvas.width = w * dpr;
-		canvas.height = h * dpr;
-		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-		ctx.fillStyle = '#0b0d11';
-		ctx.fillRect(0, 0, w, h);
-		sized = true;
-	}
-
-	STREAM.on('init', function () {
-		buildRows();
-		sized = false;
-	});
-
-	STREAM.on('spikes', function (spikes) {
-		if (panel.classList.contains('collapsed')) return;
-		if (!rows) buildRows();
-		if (!rows) return;
-		ensureSize();
-
-		var w = panel.clientWidth;
-		var h = 140;
-		var labelW = 64;
-		var plotW = w - labelW;
-		var colW = 2;
-		var rowH = h / rows.length;
-
-		// scroll plot area left
-		var dpr = window.devicePixelRatio || 1;
-		ctx.drawImage(canvas,
-			(labelW + colW) * dpr, 0, plotW * dpr - colW * dpr, h * dpr,
-			labelW, 0, plotW - colW, h);
-
-		// new column
-		ctx.fillStyle = '#0b0d11';
-		ctx.fillRect(w - colW, 0, colW, h);
+	function drawColumn(x, counts) {
+		var rowH = H / rows.length;
 		var sizes = STREAM.brain.groupSizes;
+		ctx.fillStyle = '#0b0d11';
+		ctx.fillRect(x, 0, COL_W, H);
 		for (var i = 0; i < rows.length; i++) {
 			var g = rows[i].groupIdx;
-			var frac = (spikes.g[g] || 0) / sizes[g];
+			var frac = (counts[g] || 0) / sizes[g];
 			if (frac <= 0) continue;
 			var c = REGION_COLORS[rows[i].region];
 			var a = Math.min(1, 0.15 + Math.pow(frac, 0.4) * 2);
 			ctx.fillStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a.toFixed(2) + ')';
-			ctx.fillRect(w - colW, i * rowH, colW, Math.max(1, rowH - 0.5));
+			ctx.fillRect(x, i * rowH, COL_W, Math.max(1, rowH - 0.5));
 		}
+	}
 
-		// region labels (repainted every tick over a cleared strip)
+	function drawLabels() {
+		var rowH = H / rows.length;
 		ctx.fillStyle = '#0b0d11';
-		ctx.fillRect(0, 0, labelW, h);
+		ctx.fillRect(0, 0, LABEL_W, H);
 		ctx.font = '9px ui-monospace, monospace';
 		ctx.textBaseline = 'top';
 		var lastRegion = null;
@@ -110,5 +88,51 @@
 				ctx.fillText(lastRegion, 6, j * rowH + 1);
 			}
 		}
+	}
+
+	// Full repaint from the history buffer (reopen / resize / first draw)
+	function redrawAll() {
+		var dpr = window.devicePixelRatio || 1;
+		var w = panel.clientWidth;
+		canvas.width = w * dpr;
+		canvas.height = H * dpr;
+		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+		ctx.fillStyle = '#0b0d11';
+		ctx.fillRect(0, 0, w, H);
+
+		var cols = Math.floor((w - LABEL_W) / COL_W);
+		var n = Math.min(cols, history.length);
+		for (var k = 0; k < n; k++) {
+			drawColumn(w - (n - k) * COL_W, history[history.length - n + k]);
+		}
+		drawLabels();
+		sized = true;
+	}
+
+	STREAM.on('init', function () {
+		buildRows();
+		sized = false;
+	});
+
+	STREAM.on('spikes', function (spikes) {
+		if (!rows) buildRows();
+		if (!rows) return;
+
+		// History accumulates even while the panel is collapsed
+		history.push(spikes.g);
+		if (history.length > HISTORY_MAX) history.shift();
+
+		if (panel.classList.contains('collapsed')) return;
+		if (!sized) { redrawAll(); return; }
+
+		// incremental: scroll the plot area left, draw the newest column
+		var dpr = window.devicePixelRatio || 1;
+		var w = panel.clientWidth;
+		var plotW = w - LABEL_W;
+		ctx.drawImage(canvas,
+			(LABEL_W + COL_W) * dpr, 0, (plotW - COL_W) * dpr, H * dpr,
+			LABEL_W, 0, plotW - COL_W, H);
+		drawColumn(w - COL_W, spikes.g);
+		drawLabels();
 	});
 })();
